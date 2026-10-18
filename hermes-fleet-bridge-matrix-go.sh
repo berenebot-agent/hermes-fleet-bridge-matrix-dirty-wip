@@ -12,10 +12,8 @@
 #   gomod   = ~/.cache/hermes-fleet-bridge-matrix-go/mod     module download cache (/go/pkg/mod)
 #   gobuild = ~/.cache/hermes-fleet-bridge-matrix-go/build   compiled package cache (/root/.cache/go-build)
 #
-# Toolchain image is pinned to the same Go version as the Dockerfile build
-# stage (golang:1.23). It uses the Debian variant (not alpine) so cgo is
-# available and `go test -race` works; the Dockerfile itself still builds the
-# shipped binary with CGO_ENABLED=0 on alpine. Override with HFB_GO_IMAGE.
+# Keep this pin aligned with the Dockerfile. Debian supports cgo race tests;
+# the shipped controller is built with CGO_ENABLED=0. Override with HFB_GO_IMAGE.
 #
 # RAM safety:
 #   --memory/-m limits the container's hard memory ceiling (OOM inside, not host OOM)
@@ -24,7 +22,7 @@
 
 set -eu
 
-GO_IMAGE="${HFB_GO_IMAGE:-golang:1.23-bookworm}"
+GO_IMAGE="${HFB_GO_IMAGE:-golang:1.27.2-bookworm}"
 CACHE_DIR="${HFB_GO_CACHE:-$HOME/.cache/hermes-fleet-bridge-matrix-go}"
 MOD_CACHE="$CACHE_DIR/mod"
 BUILD_CACHE="$CACHE_DIR/build"
@@ -71,6 +69,11 @@ ts=$(date +%s)
 # gofmt passthrough: `go fmt` is not `gofmt -l`, and the CI gate checks the
 # latter, so run the gofmt binary directly when asked.
 if [ "${1:-}" = "gofmt" ]; then
+    FMT_ARGS=(gofmt "${@:2}")
+    if [ "${2:-}" = "-l" ]; then
+        # Evaluate formatter output inside Docker; image-pull stderr is not a file list.
+        FMT_ARGS=(sh -c 'out=$(gofmt "$@"); rc=$?; [ "$rc" -eq 0 ] || exit "$rc"; [ -z "$out" ] || { printf "%s\n" "$out"; exit 1; }' gofmt-check "${@:2}")
+    fi
     docker run $TTY_FLAG --rm \
         --memory="$MEM_LIMIT" \
         --memory-swap="$MEM_LIMIT" \
@@ -80,7 +83,7 @@ if [ "${1:-}" = "gofmt" ]; then
         -v "$REPO_ROOT:/src" \
         -w /src \
         "$GO_IMAGE" \
-        gofmt "${@:2}" 2>&1 | tee "$LOG_FILE"
+        "${FMT_ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 else
     docker run $TTY_FLAG --rm \
         --memory="$MEM_LIMIT" \

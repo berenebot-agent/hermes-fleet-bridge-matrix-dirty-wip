@@ -1,0 +1,35 @@
+services:
+  matrix:
+    build:
+      context: .
+      provenance: false
+    image: hermes-fleet-bridge-matrix:local
+    restart: unless-stopped
+    network_mode: host
+    user: "${HFB_UID:-1000}:${HFB_GID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-0}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30m
+    mem_limit: 768m
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env}
+      MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:?Set MATRIX_SERVER_NAME in .env}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      HERMES_DIRS: ${HERMES_DIRS:-}
+      HERMES_OVERRIDES: ${HERMES_OVERRIDES:-}
+      IDLE_TIMEOUT: ${IDLE_TIMEOUT:-15m}
+      START_TIMEOUT: ${START_TIMEOUT:-120s}
+      MAX_PARALLEL_RUNS: ${MAX_PARALLEL_RUNS:-4}
+      LISTEN_ADDR: ${LISTEN_ADDR:-0.0.0.0:8088}
+      MATRIX_LISTEN_ADDR: ${MATRIX_LISTEN_ADDR:-127.0.0.1:18008}
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Add one same-path bind mount per HERMES_DIRS entry, for example:
+      # - /srv/hermes/iris:/srv/hermes/iris
