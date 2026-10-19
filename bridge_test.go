@@ -79,6 +79,21 @@ func TestConfiguration(t *testing.T) {
 	if _, err := loadConfig(); err == nil {
 		t.Fatal("identity mismatch accepted")
 	}
+	t.Setenv("MATRIX_SERVER_NAME", "chat.test")
+	// A mixed-case ADMIN_USERNAME is normalised, not refused: the homeserver lowercases
+	// localparts, so the stored account must match the one login is checked against.
+	t.Setenv("ADMIN_USERNAME", "  Ben ")
+	c, err := loadConfig()
+	if err != nil || c.Admin != "ben" {
+		t.Fatalf("mixed-case ADMIN_USERNAME not normalised: admin=%q err=%v", c.Admin, err)
+	}
+	// The reserved namespace is refused regardless of the casing used to write it.
+	for _, bad := range []string{"agent_iris", "AGENT_iris", "Agent_iris", "not a localpart", "ben!"} {
+		t.Setenv("ADMIN_USERNAME", bad)
+		if _, err := loadConfig(); err == nil {
+			t.Fatalf("reserved or malformed ADMIN_USERNAME accepted: %q", bad)
+		}
+	}
 }
 func TestEnvPreservesCredentialsAndUnrelatedValues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".env")

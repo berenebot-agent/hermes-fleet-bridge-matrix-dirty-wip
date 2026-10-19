@@ -53,10 +53,13 @@ func loadConfig() (c Config, err error) {
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`).MatchString(c.ServerName) || strings.Contains(c.ServerName, "..") {
 		return c, errors.New("MATRIX_SERVER_NAME must be a lowercase DNS hostname")
 	}
-	c.Admin = env("ADMIN_USERNAME", "admin")
+	c.Admin = strings.ToLower(strings.TrimSpace(env("ADMIN_USERNAME", "admin")))
 	c.Password = os.Getenv("ADMIN_PASSWORD")
-	if !localpart.MatchString(c.Admin) || strings.HasPrefix(c.Admin, "agent_") {
-		return c, errors.New("ADMIN_USERNAME must be a lowercase localpart outside the reserved agent_ namespace")
+	// The homeserver lowercases localparts, so a mixed-case ADMIN_USERNAME would register a
+	// different account than the one the password is later checked against. Normalise instead of
+	// refusing, and treat the reserved namespace case-insensitively.
+	if !localpart.MatchString(c.Admin) || strings.HasPrefix(c.Admin, "agent_") || strings.HasPrefix(c.Admin, "agent.") || strings.HasPrefix(c.Admin, "agent-") {
+		return c, errors.New("ADMIN_USERNAME must be a localpart outside the reserved agent_ namespace")
 	}
 	if len(c.Password) < 16 || strings.ContainsAny(c.Password, "\x00\r\n") {
 		return c, errors.New("ADMIN_PASSWORD must contain at least 16 characters and no line breaks")
