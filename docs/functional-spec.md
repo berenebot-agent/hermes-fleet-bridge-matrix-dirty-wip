@@ -1,6 +1,6 @@
 # Hermes Matrix Fleet Bridge — Functional Specification
 
-**Version:** 0.3 (implemented MVP contract)
+**Version:** 0.4 (implemented media extension)
 
 **Date:** 2026-10-19
 **Project:** `hermes-fleet-bridge-matrix-dirty-wip`  
@@ -28,6 +28,7 @@ One Docker image / one Docker Compose service bundles:
 | Web chat client | Element Web 1.12.13 static assets, digest pinned | Guaranteed bundled browser UI; compatible native Matrix clients may connect |
 | Fleet controller | Go | Provision users/rooms, receive Matrix events, durable dispatch to Hermes API, control Compose lifecycle |
 | HTTP frontend | Internal Go HTTP server/reverse proxy | One public hostname for Element and `/_matrix/*` routes |
+| Local English speech | sherpa-onnx 1.13.8, Parakeet TDT v2 INT8, FFmpeg | Voice notes become durable text prompts; CPU-only, on demand |
 
 - **One external HTTPS URL.** TLS terminates at an existing reverse proxy such as Nginx Proxy Manager.
 - **One exposed application service.** Internal homeserver and controller listeners are not published separately.
@@ -35,6 +36,7 @@ One Docker image / one Docker Compose service bundles:
 - Linux host networking: the frontend has one configurable fixed port; the homeserver listener is loopback-only. Agent bridge IPs are inspected locally; host-network members use loopback API ports.
 - No external PostgreSQL, Redis, hosted service, separate Element container, or additional manual Matrix administrator is required.
 - Existing Hermes agent containers and persistent directories remain outside this application.
+- The runtime base is Debian Bookworm, explicitly approved for glibc speech-engine compatibility. The pinned standalone speech artifact currently targets Linux amd64. No additional service, Go module, Python or Node runtime is added.
 
 **Message transport decision for initial build:** The always-running bridge controller owns Matrix bot identities and Matrix event consumption. It queues messages and relays them to Hermes through its existing authenticated HTTP run API. **Do not simultaneously enable a Hermes native Matrix client for the same room/bot**, or duplicate consumption/replies may result. This design deliberately avoids depending on a stopped native Matrix adapter to wake and recover the first incoming event.
 
@@ -119,7 +121,7 @@ Membership is the access boundary: anyone who can post in a room the bot has joi
 - Each room the bot serves has its own backfill anchor, mention policy, selected conversation and retained bridge-managed conversation inventory.
 - **Mention policy is per agent/room.** The provisioned room never requires a mention and cannot be switched to mention-only mode; a room the operator created requires one until `!require_mention off` is run in that room. Commands and valid menu reactions are always processed without a mention, except in a room shared by several of the fleet's agents' bots, where an unaddressed command is refused with a message naming the agent the sender should address (`!stop` stays global and acts in every bot's conversation there). The menu calls this Reply mode; changing it neither wakes Hermes nor changes conversation selection.
 - A **space** is joined but never dispatched from: it is a container, not a conversation.
-- Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and other non-text events. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
+- Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and unsupported event types. Supported image/file/audio messages follow the same room/mention rules. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
 - Replies are routed back to the room and thread they came from. A room the bot is removed from stops being served; a later re-invite starts a fresh conversation.
 - At most 100 rooms are served per agent; further invitations stay pending.
 
@@ -138,7 +140,7 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 - Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). Session separation is conversation/history isolation, not isolation of shared files/tools.
 - Preserve session identities across bridge and Hermes container restarts.
 - Support typing indicators while an agent starts and runs, insofar as Matrix clients display them.
-- Menu reactions are controller controls, never agent prompt text. Edits, unrelated reactions and attachments are not instructions.
+- Menu reactions are controller controls, never agent prompt text. Edits and unrelated reactions are not instructions. Attachment captions and voice transcripts are agent inputs, never bridge controls.
 
 ## 7. Message handling and lifecycle
 
@@ -147,10 +149,12 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 1. Receive an event from the always-running controller and validate room membership, event type and thread.
 2. **Persist the event ID and queued turn before advancing durable Matrix sync state.**
 3. Deduplicate repeat Matrix deliveries and place the turn in the appropriate agent/session FIFO queue.
+   For media, validate/download/stage first; transcribe marked voice notes and save
+   the transcript before creating any Hermes run. Failed preprocessing does not wake Hermes.
 4. Check the agent Compose project and call `docker compose up -d` if necessary.
 5. Wait for authenticated Hermes API readiness, subject to a startup timeout.
 6. Create the Hermes run with a stable session and idempotency key where available.
-7. Relay room-level typing and approval/status notices; send the final text answer to the originating room/thread. Token streaming is not part of this MVP.
+7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. Token streaming is not part of this MVP.
 8. Persist run and reply progress; acknowledge successful completion logically once.
 
 **Idle shutdown:**
@@ -171,6 +175,32 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 - Exactly-once visible Matrix replies cannot be promised without supported remote idempotency; document residual duplicate risk.
 - Persist a reply outbox before sending; use stable Matrix transaction IDs per chunk across retries/restarts. After eight failed sends, require `!resend`. A remote deduplication-cache expiry may still cause a visible duplicate.
 - Bound retries. Report actionable failures within the agent room without leaking credentials.
+
+### 7.1 Media contract
+
+`docs/media.md` defines the supported Matrix event shapes, filesystem and
+final-reply attachment protocol. Hermes remains unchanged: files use existing
+local-path tools and voice becomes text before the authenticated run API is called.
+
+- Persist media references with event receipt/sync, staged checksums before use,
+  transcripts before admission, and private output snapshots before outbox creation.
+- Accept only local homeserver `mxc://` media, authenticated downloads, no redirects,
+  no arbitrary URL fetches, no encrypted attachments, no shell interpolation.
+- The member write scope explicitly expands to `data/matrix-media/`; all private
+  snapshots/model files remain under the bridge's existing `data/controller/` mount.
+- Bound files to 20 MiB, combined turn media to 100 MiB, outgoing attachments to five,
+  and managed member/private media to 1 GiB per agent. Do not evict pinned recovery
+  files to make room. Model storage and bounded transient audio are separate.
+- Terminal-turn files expire after seven days; queued/active/held turns and pending
+  attachment deliveries stay pinned. Resumed history may refer to expired files.
+- Voice is English-only Parakeet v2, maximum five minutes, one recording at a time,
+  local-only, with subprocess time/CPU/address-space limits. Recognition is fallible;
+  no confidence score, translation or confirmation UI is claimed.
+- Only explicit filenames in the originating turn's outgoing folder can be sent;
+  reject links, non-regular files, unsafe names and known managed credentials.
+- Persist uploaded MXC IDs before sending messages; stable message transaction IDs
+  minimise duplicate visible delivery. A crash before saving an upload response can
+  orphan/repeat a server media object without repeating the Hermes turn.
 
 ## 8. Hermes command parity
 
@@ -226,9 +256,9 @@ Actual Element X tap behavior is a separate acceptance check, not yet verified.
 
 ## 10. V1 boundaries
 
-**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory plus every room or space an approved human invites the bot to; URL/login/password-only Web users; durable message relay; wake/idle stop; room-level conversation selection; retained legacy thread history/recovery; reaction controls; typing indicator; text replies; per-room mention policy; basic health; verified commands where APIs exist. Native mobile client login is controlled by that client, not bundled Element settings.
+**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory plus every room or space an approved human invites the bot to; URL/login/password-only Web users; durable message relay; wake/idle stop; room-level conversation selection; retained legacy thread history/recovery; reaction controls; typing indicator; text replies and explicit image/file exchange; local English voice-note transcription; per-room mention policy; basic health; verified commands where APIs exist. Native mobile client login is controlled by that client, not bundled Element settings.
 
-**Out of scope:** Federation, public signup, arbitrary external Matrix servers, agent-to-agent autonomous loops, cross-host orchestration, agent cron scheduling, external-job safety, file/audio/media relay, custom chat UI, E2EE, multi-tenant SaaS, community-space management (curating spaces, room ordering and restricted-join rules on the operator's behalf), and comprehensive Matrix administration tools.
+**Out of scope:** Federation, public signup, arbitrary external Matrix servers, agent-to-agent autonomous loops, cross-host orchestration, agent cron scheduling, external-job safety, video processing, generated voice replies, speech translation, custom chat UI, E2EE, multi-tenant SaaS, community-space management (curating spaces, room ordering and restricted-join rules on the operator's behalf), and comprehensive Matrix administration tools.
 
 ## 11. Acceptance tests
 

@@ -38,8 +38,8 @@ stale blocking questions for the next implementer.
 - Per-room backfill anchors and a selected Hermes conversation per room, with
   non-destructive New/Resume and bridge-only inventory. The provisioned room keeps the strict fail-closed
   history rule; a user-created room may not wedge the agent's other rooms.
-- State version 3 upgrades versions 1/2 in place, preserving IDs and adding menu
-  delivery/action state and selected conversations. Older controllers refuse the
+- State version 4 upgrades versions 1/2/3 in place, preserving IDs and adding media
+  recovery state alongside menu delivery/action state and selected conversations. Older controllers refuse the
   new version rather than silently routing to the old default conversation.
 - Parallel sessions are supported; FIFO within each session. Agent files/tools
   remain shared. No artificial single-run-per-agent restriction.
@@ -66,6 +66,18 @@ stale blocking questions for the next implementer.
 - `PUBLIC_URL` and `MATRIX_SERVER_NAME` are Compose/.env settings. Initial identity
   is permanent; mismatches are errors, not silent renames or database resets.
 - Replace unsupported Go 1.23 with supported, pinned Go 1.27.2 in Docker.
+- Explicitly approved media extension: receive/send images and files; receive
+  English voice notes and transcribe locally into normal text prompts, without
+  Hermes modifications. No generated voice replies or cloud transcription.
+- Reuse Parakeet TDT 0.6B v2 INT8 through standalone sherpa-onnx, with FFmpeg for
+  decoding. The glibc executable failed on Alpine; Debian Bookworm was then
+  explicitly approved. No Node/Python runtime, new Go modules or extra services.
+- Extend member write scope only to dedicated `data/matrix-media/` folders;
+  restrict output references to explicit filenames in per-turn folders and
+  snapshot them privately before durable delivery. No filesystem watcher.
+- Limits agreed: 20 MiB/file, 100 MiB/turn, 1 GiB/agent; seven-day terminal retention,
+  with queued/active/held turns and pending delivery pinned. Five outgoing files
+  and five minutes per voice note; native processing also has resource/time caps.
 
 ## Feasibility outcomes
 

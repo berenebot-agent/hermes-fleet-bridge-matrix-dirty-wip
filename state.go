@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const stateVersion = 3
+const stateVersion = 4
 const maxPending = 100
 
 // maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
@@ -68,6 +68,9 @@ type Turn struct {
 	Approval                                         string
 	Attempts                                         int
 	Created                                          time.Time
+	Media                                            *Attachment
+	Completed                                        time.Time
+	MediaCleaned                                     bool
 }
 type Notice struct {
 	ID, Room, Thread, Text string
@@ -77,6 +80,8 @@ type Notice struct {
 	Sent                   int
 	Attempts               int
 	Next                   time.Time
+	Media                  *Attachment
+	TurnID                 string
 }
 
 // stateV1 and memberV1 are the frozen state version 1 on-disk shapes. Never edit them: they
@@ -111,7 +116,7 @@ func loadState(b []byte, out *State) (bool, error) {
 	switch head.Version {
 	case stateVersion:
 		return false, json.Unmarshal(b, out)
-	case 2:
+	case 2, 3:
 		if err := json.Unmarshal(b, out); err != nil {
 			return false, err
 		}
@@ -297,6 +302,10 @@ func openStore(c Config) (*Store, error) {
 			if t.Room == "" {
 				t.Room = m.Room
 			}
+			if t.Media != nil && !validAttachment(t.Media, false) {
+				f.Close()
+				return nil, errors.New("invalid inbound media state; restore a consistent backup")
+			}
 			switch t.Phase {
 			case "queued", "preparing", "submitting", "running", "held", "processing", "done":
 			default:
@@ -311,6 +320,10 @@ func openStore(c Config) (*Store, error) {
 			}
 			if n.Room == "" {
 				n.Room = m.Room
+			}
+			if n.Media != nil && (n.TurnID == "" || !validAttachment(n.Media, true)) {
+				f.Close()
+				return nil, errors.New("invalid attachment outbox; restore a consistent backup")
 			}
 		}
 	}
@@ -342,9 +355,15 @@ func (s *Store) Update(fn func(*State) error) error {
 	for _, m := range s.state.Members {
 		for _, t := range m.Turns {
 			if t.Phase == "done" {
+				if t.Completed.IsZero() {
+					t.Completed = time.Now().UTC()
+				}
 				t.Text = ""
 				t.Root = ""
 				t.Request = nil
+				if t.Media != nil {
+					t.Media.Transcript = ""
+				}
 			}
 		}
 	}
@@ -443,7 +462,7 @@ func prune(m *Member) {
 	}
 	out := m.Turns[:0]
 	for _, t := range m.Turns {
-		if t.Phase != "done" || time.Since(t.Created) < 7*24*time.Hour {
+		if t.Phase != "done" || time.Since(t.Completed) < 7*24*time.Hour || !t.MediaCleaned {
 			out = append(out, t)
 		}
 	}

@@ -5,11 +5,13 @@ Build the application image first. --keep retains the scratch bridge for a brows
 check; run the recorded cleanup command afterwards. No live fleet is mounted.
 """
 import argparse
+import base64
 import hashlib
 import http.server
 import json
 import os
 import pathlib
+import re
 import secrets
 import socket
 import subprocess
@@ -22,6 +24,7 @@ import urllib.request
 REPO = pathlib.Path(__file__).resolve().parents[1]
 HERMES = "nousresearch/hermes-agent@sha256:9774f4f39a9bb8c2f68ce728ed5e99ddbad282163be56764afacf88ed952b784"
 REDACTIONS = []
+PIXEL = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a5XsAAAAASUVORK5CYII=")
 
 def free_port():
     with socket.socket() as s:
@@ -52,6 +55,7 @@ def wait_for(check, timeout=180):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true")
+    parser.add_argument("--image", default="hermes-fleet-bridge-matrix:local")
     args = parser.parse_args()
     suffix = secrets.token_hex(4)
     root = REPO / "tests/logs" / ("integration-" + suffix)
@@ -99,6 +103,13 @@ def main():
             approval='approval-check' in text and not any(m.get('role')=='tool' for m in body.get('messages',[]))
             tool={'id':'call_hfb_approval','type':'function','function':{'name':'terminal','arguments':json.dumps({'command':'rm -rf /tmp/hfb_matrix_approval_nonexistent_'+suffix})}}
             answer = "Integration reply " + hashlib.sha256(text.encode()).hexdigest()[:12]
+            if "media-roundtrip-check" in text or "image-roundtrip-check" in text:
+                turn_hash = re.search(r"/opt/data/matrix-media/outgoing/([0-9a-f]+)/", text).group(1)
+                output = home / "matrix-media/outgoing" / turn_hash
+                output.mkdir(parents=True, exist_ok=True)
+                (output / "result.txt").write_text("isolated media result\n")
+                (output / "pixel.png").write_bytes(PIXEL)
+                answer = "Media reply\nMATRIX_FILE: result.txt\nMATRIX_FILE: pixel.png"
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream" if body.get("stream") else "application/json")
             self.end_headers()
@@ -145,11 +156,12 @@ def main():
     os.chmod(envfile, 0o600)
     base = f"http://127.0.0.1:{frontend}"
 
-    def request(method, path, body=None, token=None):
-        headers = {"Content-Type": "application/json"}
+    def request(method, path, body=None, token=None, content_type="application/json"):
+        headers = {"Content-Type": content_type}
         if token:
             headers["Authorization"] = "Bearer " + token
-        r = urllib.request.Request(base + path, data=json.dumps(body).encode() if body is not None else None, method=method, headers=headers)
+        payload = body if isinstance(body, bytes) else json.dumps(body).encode() if body is not None else None
+        r = urllib.request.Request(base + path, data=payload, method=method, headers=headers)
         try:
             with urllib.request.urlopen(r, timeout=40) as response:
                 return json.load(response)
@@ -163,7 +175,7 @@ def main():
         mounts=[]
         for directory in members:
             mounts+=['-v',str(directory)+':'+str(directory)]
-        docker("run", "-d", "--name", bridge, "--network", "host", "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.stat("/var/run/docker.sock").st_gid), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777", "--memory", "768m", "--env-file", str(envfile), "-v", str(data) + ":/data", *mounts, "-v", "/var/run/docker.sock:/var/run/docker.sock", "hermes-fleet-bridge-matrix:local")
+        docker("run", "-d", "--name", bridge, "--network", "host", "--user", f"{os.getuid()}:{os.getgid()}", "--group-add", str(os.stat("/var/run/docker.sock").st_gid), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges:true", "--tmpfs", "/tmp:rw,nosuid,nodev,size=64m,mode=1777", "--memory", "3g", "--env-file", str(envfile), "-v", str(data) + ":/data", *mounts, "-v", "/var/run/docker.sock:/var/run/docker.sock", args.image)
         wait_for(lambda: request("GET", "/healthz")["ready"])
 
     try:
@@ -213,6 +225,32 @@ def main():
         messages = request("GET", "/_matrix/client/v3/rooms/" + escaped_room + "/messages?dir=b&limit=100", token=token)["chunk"]
         assert any("Integration reply" in ev.get("content", {}).get("body", "") for ev in messages)
         print("PASS stopped agent cold-wake, actual Hermes run, final Matrix reply", flush=True)
+
+        uploaded = request("POST", "/_matrix/media/v3/upload?filename=input.txt", b"isolated input file\n", token, "text/plain")["content_uri"]
+        content = {"msgtype": "m.file", "body": "media-roundtrip-check", "filename": "input.txt", "url": uploaded, "info": {"size": 20, "mimetype": "text/plain"}}
+        attachment = request("PUT", "/_matrix/client/v3/rooms/" + escaped_room + "/send/m.room.message/" + secrets.token_hex(12), content, token)["event_id"]
+        wait_for(lambda: settled(attachment))
+        wait_for(lambda: not state()["Outbox"])
+        received = settled(attachment)["Media"]
+        assert received["Ready"] and received["SHA256"] == hashlib.sha256(b"isolated input file\n").hexdigest()
+        messages = request("GET", "/_matrix/client/v3/rooms/" + escaped_room + "/messages?dir=b&limit=100", token=token)["chunk"]
+        returned = next(ev["content"] for ev in messages if ev.get("content", {}).get("msgtype") == "m.file" and ev["content"]["body"] == "result.txt")
+        server, media_id = returned["url"].removeprefix("mxc://").split("/", 1)
+        download = urllib.request.Request(base + "/_matrix/client/v1/media/download/" + server + "/" + media_id, headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(download, timeout=30) as response:
+            assert response.read() == b"isolated media result\n"
+        returned_image = next(ev["content"] for ev in messages if ev.get("content", {}).get("msgtype") == "m.image" and ev["content"]["body"] == "pixel.png")
+        server, media_id = returned_image["url"].removeprefix("mxc://").split("/", 1)
+        download = urllib.request.Request(base + "/_matrix/client/v1/media/download/" + server + "/" + media_id, headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(download, timeout=30) as response:
+            assert response.read() == PIXEL
+        uploaded_image = request("POST", "/_matrix/media/v3/upload?filename=pixel.png", PIXEL, token, "image/png")["content_uri"]
+        content = {"msgtype": "m.image", "body": "image-roundtrip-check", "filename": "pixel.png", "url": uploaded_image, "info": {"size": len(PIXEL), "mimetype": "image/png"}}
+        image_event = request("PUT", "/_matrix/client/v3/rooms/" + escaped_room + "/send/m.room.message/" + secrets.token_hex(12), content, token)["event_id"]
+        wait_for(lambda: settled(image_event))
+        wait_for(lambda: not state()["Outbox"])
+        assert settled(image_event)["Media"]["MIME"] == "image/png"
+        print("PASS actual Matrix authenticated file/image input downloads, Hermes text-run attachment contract, output uploads and downloads", flush=True)
 
         slow = send("slow-restart-check")
         wait_for(lambda: next((t for t in (state()["Turns"] or []) if t["ID"] == slow and t["RunID"]), None))
@@ -292,7 +330,7 @@ def main():
         metadata = {"base": base, "root": str(root), "bridge": bridge, "compose": str(compose), "room": room}
         (REPO / "tests/logs/browser-fixture.json").write_text(json.dumps(metadata))
         os.chmod(REPO / "tests/logs/browser-fixture.json", 0o600)
-        (root / "result.json").write_text(json.dumps({"passed": True, "checks": 9, "root": str(root)}))
+        (root / "result.json").write_text(json.dumps({"passed": True, "checks": 10, "root": str(root)}))
         if args.keep:
             print("Scratch bridge retained for browser check; metadata: tests/logs/browser-fixture.json", flush=True)
     except Exception as error:

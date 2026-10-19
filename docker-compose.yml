@@ -15,7 +15,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 30m
-    mem_limit: 768m
+    mem_limit: 3g
     environment:
       PUBLIC_URL: ${PUBLIC_URL:?Set PUBLIC_URL in .env}
       MATRIX_SERVER_NAME: ${MATRIX_SERVER_NAME:?Set MATRIX_SERVER_NAME in .env}

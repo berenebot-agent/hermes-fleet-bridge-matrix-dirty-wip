@@ -255,8 +255,16 @@ type Event struct {
 	Type     string `json:"type"`
 	StateKey string `json:"state_key"`
 	Content  struct {
-		Body    string `json:"body"`
-		MsgType string `json:"msgtype"`
+		Body     string          `json:"body"`
+		MsgType  string          `json:"msgtype"`
+		URL      string          `json:"url"`
+		Filename string          `json:"filename"`
+		File     json.RawMessage `json:"file"`
+		Voice    json.RawMessage `json:"org.matrix.msc3245.voice"`
+		Info     struct {
+			MIME string `json:"mimetype"`
+			Size int64  `json:"size"`
+		} `json:"info"`
 		// Membership appears on m.room.member events (invite detection).
 		Membership string `json:"membership"`
 		// CreateType is the m.room.create content type, which marks a space.
@@ -492,7 +500,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				scan.turns = append(scan.turns, &Turn{ID: ev.ID, Room: room, Sender: ev.Sender, MenuID: ev.Content.Relation.ID, Choice: ev.Content.Relation.Key, Text: "!menu-choice", Kind: "command", Phase: "queued", Created: time.Now().UTC()})
 				continue
 			}
-			if botSender(ev.Sender) || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" {
+			if botSender(ev.Sender) || ev.Type != "m.room.message" || (ev.Content.MsgType != "m.text" && !mediaMessage(ev.Content.MsgType)) {
 				continue
 			}
 			thread := ""
@@ -509,7 +517,14 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				}
 			}
 			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot), Phase: "queued", Created: time.Now().UTC()}
-			if strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
+			if mediaMessage(ev.Content.MsgType) {
+				t.Media = incomingMedia(ev)
+				// With filename present, body is a caption; otherwise it is the display filename.
+				if ev.Content.Filename == "" {
+					t.Text = ""
+				}
+			}
+			if t.Media == nil && strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
 			// A command that does not address this agent is ambiguous once several fleet bots
@@ -578,6 +593,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				} else if len(t.Text) > 16<<10 || len(t.Root) > 16<<10 {
 					t.Phase = "done"
 					addNotice(current, t.ID+"-size", room, t.Thread, "Message or thread root exceeds the 16 KiB text limit; nothing was dispatched.")
+				} else if t.Media != nil && t.Media.Error != "" {
+					t.Phase = "done"
+					addNotice(current, t.ID+"-media", room, t.Thread, t.Media.Error+" Nothing was dispatched.")
 				} else if pending(current) >= maxPending && t.Kind == "" {
 					t.Phase = "done"
 					addNotice(current, t.ID+"-busy", room, t.Thread, "Agent queue is full (100 turns); nothing was dispatched. Try again later.")
@@ -694,6 +712,9 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 			}
 			return nil
 		})
+	}
+	if n.Media != nil {
+		return mx.sendMedia(ctx, s, id, room, n)
 	}
 	parts := chunks(n.Text)
 	bot := mx.cred("agent_" + id)

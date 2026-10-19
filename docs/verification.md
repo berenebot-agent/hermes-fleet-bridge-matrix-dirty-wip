@@ -21,6 +21,76 @@ Application images contain the controller, static Element assets, Tuwunel and
 Docker CLI/Compose in one service. Third-party licences are copied with pinned
 checksums and served under `/licenses/`. No third-party Go modules.
 
+## Media extension (2026-10-19)
+
+Implementation/tests and push were explicitly authorized. No subagents, real
+provider calls, live fleet changes or live service restart.
+
+Additional pinned artifacts:
+
+- Debian Bookworm Slim:
+  `sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587`.
+- sherpa-onnx 1.13.8 Linux x64 static-no-tts archive:
+  `sha256:cb9efc3014d66b4c68f602db2447ac0fc847d6b6e9152216e12ccb6b6e4c4d10`.
+- Parakeet TDT 0.6B v2 INT8 model archive:
+  `sha256:157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad`.
+  Each persisted component also has an in-controller checksum pin.
+
+Feasibility: the standalone recognizer requires `/lib64/ld-linux-x86-64.so.2`
+despite the archive's “static” name. It failed to launch in the Alpine bridge
+image; after explicit approval to use Debian, the same executable transcribed
+the public bundled 7.435-second sample in approximately 0.738 seconds plus 2.401
+seconds model load, using CPU/two threads in an isolated 2 GiB container. This is
+one sample, not a general latency/accuracy guarantee.
+
+The pinned real Hermes image was inspected without networking or credentials:
+`tools/vision_tools.py` supports local-path image input. Generic files use existing
+agent filesystem/document tools; no general Hermes media HTTP API was assumed.
+OpenChamber's model catalog and native recognizer source confirm the v2 INT8 model
+and CPU sherpa-onnx engine being reused, not its Node stack.
+
+Passed `vet ./...` and the full fake-endpoint `test -race ./...` suite, including
+new media tests. Final race log:
+`tests/logs/hermes-fleet-bridge-matrix-go/20261019T042501-go-test_-race_._...-1945816.log`.
+Coverage includes durable receipt/dedup, captions, local MXC validation, encrypted
+refusal, checked file staging, quota refusal before downloading, unsafe/link/path
+refusal, immutable snapshots, persisted upload URI/stable transaction IDs, restart
+validation, state v3→v4 migration, held/pending-delivery retention, cleanup,
+managed-credential refusal, control responsiveness during a blocked download,
+and voice-text admission/file-only replies through a fake Hermes API.
+
+The rebuilt Debian image (`hermes-fleet-bridge-matrix:media-check`) passed the
+native speech smoke with networking disabled, no Docker socket, a read-only root,
+64 MiB `/tmp`, dropped capabilities, no-new-privileges and a 3 GiB cgroup cap. WAV
+and Ogg/Opus recordings became persisted text prompts; a subsequent call with no
+executable search path reused the saved transcript successfully. First-use WAV
+processing including model cache initialization took 8.823 seconds under concurrent
+validation load; Ogg/Opus took 5.037 seconds. These are sample measurements only.
+Log: `tests/logs/media-speech.log`. The compressed model expands to about 631 MiB;
+the real smoke caught and corrected an initially too-small model-file copy bound.
+The ordinary suite skips `TestVoiceRuntime` unless explicitly enabled.
+
+Image build log: `tests/logs/media-build.log`. Component smoke confirmed Docker
+29.9.1, Compose 5.6.0, Tuwunel 1.9.2 and Debian FFmpeg 5.1.9-0+deb12u1 launch under
+the Debian runtime. The service's memory cap rises from 768 MiB to 3 GiB for local
+speech; idle model-process RAM remains zero because inference is on demand.
+
+The complete isolated Matrix/Hermes integration suite passed using that image:
+`python3 tests/integration.py --image hermes-fleet-bridge-matrix:media-check`.
+Log: `tests/logs/media-integration.log`. Scratch-only real Tuwunel/Element/Hermes
+containers verified authenticated local input file/image downloads, checksummed
+staging, the text-run attachment protocol, generated file/image uploads and
+authenticated download of their exact bytes. Fake inference creates the selected
+output fixtures: this checks the transport, not a real model's tool selection or
+understanding of an image/document. Existing cold wake, restart/no duplicate run,
+New/Resume, approvals, Stop, command/model paths, idle shutdown and removal checks
+also passed. The fixture cleaned up its scratch containers/projects afterwards.
+
+Not verified: actual Element Web/Element X media upload, voice UI/captions,
+production proxy upload limits, real model providers/tool selection, long/noisy
+recordings, multilingual speech, ARM builds, or live deployment. This extension
+does not change that earlier browser/integration results below are historical.
+
 ## Reaction menus and room conversations (2026-10-19)
 
 The latest change adds bridge-owned reaction menus, not Element/Tuwunel changes.

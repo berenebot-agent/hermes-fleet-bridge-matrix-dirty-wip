@@ -1,7 +1,8 @@
 # Hermes Matrix Fleet Bridge
 
 A single-container Matrix + Element chat service that wakes existing Hermes
-Compose agents, relays text through their authenticated run API, and stops their
+Compose agents, relays text and attachments, transcribes English voice notes
+locally, and stops their
 Compose projects after verified inactivity. Go controller, standard library only.
 
 **MVP implemented.** The bundled homeserver, real Hermes image and Element browser
@@ -43,7 +44,7 @@ application, not public SaaS.
 
 ## Operator setup
 
-Requires a **Linux Docker host**, Docker Compose **2.39+** (5.6 was tested), and an
+Requires a **Linux amd64 Docker host**, Docker Compose **2.39+** (5.6 was tested), and an
 existing HTTPS reverse proxy. All agents must run on that Docker host. Native
 Matrix clients can use the same Matrix endpoint; their own setup screens are not
 controlled by the bundled Element configuration.
@@ -204,8 +205,42 @@ completed local choice. Menus/reaction chips use the durable reply outbox and
 stable Matrix transaction IDs; `!resend` also retries blocked menu delivery.
 
 Unsupported commands never pretend to succeed or become agent instructions.
-Unrelated reactions, edits, attachments and non-text events do not wake agents.
+Unrelated reactions, edits and unsupported event types do not wake agents.
 An authorized menu choice can wake an agent only for a control that needs its API.
+
+## Images, files and voice notes
+
+Send an image or file, optionally with a caption, in the room's main chat. Each
+upload is one turn; separate uploads/messages are not automatically grouped.
+Existing room/mention/bot rules still apply. Encrypted attachments and remote
+homeserver media are refused. Images use Hermes's existing local-path vision tool;
+document interpretation depends on the agent's installed tools.
+
+Voice notes carrying the Matrix voice-message marker are transcribed locally in
+English using **Parakeet TDT 0.6B v2 INT8 + sherpa-onnx + FFmpeg**. The saved
+transcript becomes a normal Hermes prompt automatically. No Groq key or cloud
+speech service is used. An ordinary audio-file upload remains a file, not a spoken
+instruction. Transcripts never execute bridge `!` commands. Speech recognition can
+mishear instructions: use typed messages for exact or high-risk requests.
+
+Agents can return images/files using explicit final-reply references to a
+turn-specific outgoing folder. The bridge supplies that folder and marker format
+in each prompt; it does not scan the agent's filesystem or upload arbitrary paths.
+Selected files are snapshotted before entering the durable reply outbox.
+
+Limits: **20 MiB/file, 100 MiB/turn, 1 GiB managed media/agent, five outgoing
+files/turn, five minutes/voice note**. Retain terminal-turn files for seven days;
+queued/active/held turns and pending file deliveries remain pinned. Lower
+homeserver limits still apply. Local speech runs one recording at a time, with
+bounded execution time/memory; longer recordings may hit those limits. The engine
+loads on demand, so no model process stays resident while idle.
+
+Compose caps the whole service at **3 GiB**, raised from 768 MiB for local speech.
+The persistent model cache uses about **631 MiB**, in addition to its image copy.
+The image includes the pinned model; on first voice use it is copied and verified
+under `data/controller/models/`. Media also uses the explicitly approved member
+`data/matrix-media/` folders; back up these with the bridge state. See
+[the media contract](docs/media.md) for paths, recovery, retention and checks.
 
 ## Recovery and limits
 
@@ -216,8 +251,8 @@ an unbridgeable gap fails closed instead of silently dropping messages. That
 fail-closed rule protects the agent's own provisioned room; in a room the operator
 created, a history gap restarts that room's stream instead of wedging every other
 room. State written by an earlier version is upgraded in place on start.
-The current state version is 3; versions 1/2 retain their existing session IDs.
-Older controllers refuse version 3 rather than silently ignoring selected chats.
+The current state version is 4; versions 1/2/3 retain their existing session IDs.
+Older controllers refuse version 4 rather than silently ignoring queued media.
 Downgrade only with a matching controller/state backup; never edit the version
 number to force a rollback.
 
@@ -232,7 +267,7 @@ request/key **only within the advertised durable retention window**, with a safe
 margin. Uncertain or interrupted execution holds the session; it is never blindly
 rerun. Other sessions can continue. Held work prevents idle shutdown.
 
-Final text is persisted in a reply outbox before sending. Stable Matrix transaction
+Final text and attachment metadata are persisted in a reply outbox before sending. Stable Matrix transaction
 IDs reduce reply duplication but **exactly-once visible delivery is not promised**.
 Admission retries are bounded to three, visibility failures to eight, reply retries
 to eight before `!resend`. Long successful runs continue polling. Startup and
@@ -261,7 +296,9 @@ controller state or secrets to fix startup. Missing/corrupt state beside an
 existing database is rejected to prevent historical command replay. Keep the same
 hostname and configured absolute member paths when moving hosts.
 
-The image pins Tuwunel, Element, Go and Docker CLI artifacts. Back up before an
+The Debian-based image pins Tuwunel, Element, Go, Docker CLI, sherpa-onnx and model
+artifacts. FFmpeg and its dependencies come from Debian's signed Bookworm repositories.
+Back up before an
 upgrade: RocksDB upgrades may not be reversible. Compose allows 30 minutes for
 homeserver migrations to shut down safely. The controller supervises Tuwunel;
 either component's fatal failure stops the service. Homeserver stdout/stderr is
