@@ -159,6 +159,12 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   refused with a message naming that agent. `!stop` is the exception and still
   stops every agent's conversation in that room. A room with a single bot — a DM,
   or the agent's own provisioned room — never needs an address.
+- **A message addressed to another of the fleet's agents is ignored** by every
+  other agent wherever it appears: if the text opens with another bot's handle, or
+  Element records a mention of another bot and not this one, that agent answers and
+  the rest stay silent — no reply, no nag, and never the other agent's addressing
+  handed to a model as a prompt. Ordinary prose that merely names another agent is
+  not affected.
 - `!status` — queue/run information without waking.
 - `!models [filter]` — paginated configured model/provider choices, with advertised
   route IDs as a fallback (not a guarantee that every route is configured). Can wake

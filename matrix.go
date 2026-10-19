@@ -417,6 +417,37 @@ func stripMention(text string, bot Credential) string {
 	return text
 }
 
+// addressedElsewhere reports whether a message addresses another agent of the fleet: an exact
+// bot handle opening the body, or an explicit mention of another agent bot without one of this
+// bot. That message belongs to the other agent, so this bot answers nothing and never hands
+// another agent's addressing to Hermes as a prompt. Only the opening token counts, so ordinary
+// prose that merely names another agent through a full user ID is untouched.
+func addressedElsewhere(ev Event, bot Credential) bool {
+	own := localUser(bot.User)
+	if fields := strings.Fields(ev.Content.Body); len(fields) > 0 {
+		// Element writes a member mention as "@agent_x:server", a bare localpart, or the display
+		// name (the localpart here) with its own trailing colon.
+		word := strings.TrimRight(fields[0], ":,-")
+		if strings.HasPrefix(word, "@") {
+			if la := localUser(word); la != own && botSender(la) {
+				return true
+			}
+		} else if !strings.Contains(word, ":") && word != own && botSender(word) {
+			return true
+		}
+	}
+	other := false
+	for _, u := range ev.Content.Mentions.UserIDs {
+		if u == bot.User {
+			return false
+		}
+		if botSender(u) {
+			other = true
+		}
+	}
+	return other
+}
+
 // roomIsSpace reports whether a room is a space container. Sync state answers it for newly
 // joined rooms; otherwise the create event is fetched once and cached on the room.
 func (mx *Matrix) roomIsSpace(ctx context.Context, token, room string, state []Event) (bool, error) {
@@ -523,6 +554,11 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				if ev.Content.Filename == "" {
 					t.Text = ""
 				}
+			}
+			// A message addressed to another agent of the fleet is that agent's: stay silent
+			// instead of answering it or handing another agent's addressing to Hermes.
+			if addressedElsewhere(ev, bot) {
+				continue
 			}
 			if t.Media == nil && strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"

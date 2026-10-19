@@ -1110,6 +1110,54 @@ func TestSharedRoomCommandsRequireAddressing(t *testing.T) {
 	}
 }
 
+// A message addressed to another agent of the fleet belongs to that agent: this bot stays silent
+// instead of answering it or handing another agent's addressing to Hermes, while its own
+// addressing and ordinary prose that merely names another agent still work.
+func TestMessagesAddressedToAnotherAgentAreIgnored(t *testing.T) {
+	c, s := testStore(t)
+	team := "!team:chat.test"
+	s.Update(func(st *State) error {
+		// Reply mode off: without this rule every message here would be dispatched.
+		st.Members["iris"].Rooms[team] = &Room{}
+		st.Members["zed"] = &Member{ID: "zed", Enabled: true, Room: "!zed:chat.test", Rooms: map[string]*Room{team: {}}, Sessions: map[string]map[string]*Session{}}
+		return nil
+	})
+	// A mention of both agents still opens with the other agent's handle, so the addressee wins.
+	both := message("$both", "@admin:chat.test", "agent_zed: !menu", "")
+	both["content"].(map[string]any)["m.mentions"] = map[string]any{"user_ids": []string{"@agent_zed:chat.test", "@agent_iris:chat.test"}}
+	mention := message("$mention", "@admin:chat.test", "summarise this", "")
+	mention["content"].(map[string]any)["m.mentions"] = map[string]any{"user_ids": []string{"@agent_zed:chat.test"}}
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		replyJSON(w, syncRooms(map[string]any{team: map[string]any{"timeline": map[string]any{"events": []any{
+			// Element's rendered mention: the localpart with its own colon trail.
+			message("$handle", "@admin:chat.test", "agent_zed: !menu", ""),
+			message("$full", "@admin:chat.test", "@agent_zed:chat.test: !menu", ""),
+			both,
+			mention,
+			message("$prose", "@admin:chat.test", "agent_zed:chat.test is slow today, summarise this", ""),
+			addressed("$own", "!menu"),
+		}}}}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	for _, id := range []string{"$handle", "$full", "$both", "$mention"} {
+		if findTurn(m, id) != nil {
+			t.Fatalf("%s is another agent's message but was dispatched: %+v", id, findTurn(m, id))
+		}
+	}
+	if len(m.Outbox) != 0 {
+		t.Fatalf("ignoring another agent's message must be silent: %+v", m.Outbox)
+	}
+	if findTurn(m, "$prose") == nil {
+		t.Fatal("prose that only names another agent must still reach this agent")
+	}
+	if findTurn(m, "$own") == nil {
+		t.Fatal("message addressed to this agent was ignored")
+	}
+}
+
 func TestRequireMentionCommandTogglesPerRoom(t *testing.T) {
 	engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { replyJSON(w, map[string]any{}) })
 	room := "!team:chat.test"

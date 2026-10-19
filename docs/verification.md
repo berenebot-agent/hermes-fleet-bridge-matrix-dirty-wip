@@ -161,6 +161,10 @@ Fake-endpoint tests cover:
 - Shared-room commands: with two agents' bots in one room, a bare command is refused
   with one explanation naming the agent, an addressed command and `!stop` still
   dispatch, and a single-bot room and the agent's own room are unaffected.
+- Another agent's message: a body opening with another fleet bot's handle, and an
+  explicit mention of another bot without this one, produce no turn and no notice in
+  Reply-mode-off rooms, while prose naming another agent and a message addressed to
+  this agent still dispatch.
 - Space containers are tracked and joined but never dispatched from.
 - Invitation handling: a human invitation joins, a bot invitation never joins, and
   startup reconciliation accepts a pending invitation without moving the sync cursor.

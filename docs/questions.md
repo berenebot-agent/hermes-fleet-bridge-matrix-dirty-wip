@@ -31,6 +31,13 @@ stale blocking questions for the next implementer.
   exception and remains global, stopping every agent's conversation in that room.
   "Several" is derived from the per-agent room records sync already maintains, so no
   extra homeserver call is made; detection is therefore as fresh as each agent's sync.
+- A message addressed to another fleet agent is ignored by the others, in any room and
+  whatever that room's reply mode: another bot's handle opening the text, or an
+  explicit mention of it without this agent, means the text belongs to that agent and
+  must not reach a model as a prompt. The check is the opening token, so prose that
+  merely names another agent still reaches this one; a bot also addressed itself is
+  unaffected by the mention form. Reply mode stays the sender's choice for unaddressed
+  messages, which is why an off room still sends plain text to every agent in it.
 - The bridge grants the human administrator power level 100 in each provisioned room
   and repairs it on reconciliation. Tuwunel's `private_chat` preset leaves an invitee
   at power level 0, which blocks renaming a room and filing it into a space: Element
