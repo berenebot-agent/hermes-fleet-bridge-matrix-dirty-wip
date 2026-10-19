@@ -814,6 +814,8 @@ func TestProvisionRecoversAliasBeforeLocalMapping(t *testing.T) {
 				}
 			}
 			replyJSON(w, map[string]any{"users": map[string]any{}})
+		case strings.Contains(r.URL.Path, "/profile/"):
+			replyJSON(w, map[string]any{"displayname": "iris"})
 		default:
 			created.Add(1)
 			w.WriteHeader(500)
@@ -839,6 +841,8 @@ func TestSavedRoomDoesNotDependOnAlias(t *testing.T) {
 			replyJSON(w, map[string]string{"membership": "join"})
 		case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
 			replyJSON(w, map[string]any{"users": map[string]any{}})
+		case strings.Contains(r.URL.Path, "/profile/"):
+			replyJSON(w, map[string]any{"displayname": "agent_iris"})
 		default:
 			created.Add(1)
 			w.WriteHeader(404)
@@ -852,42 +856,60 @@ func TestSavedRoomDoesNotDependOnAlias(t *testing.T) {
 	}
 }
 
-// A room whose administrator already holds power level 100 is left alone, so reconciliation
-// does not rewrite room state on every restart.
-func TestProvisionGrantsAdminPowerLevelsOnce(t *testing.T) {
-	for _, existing := range []any{map[string]any{}, map[string]any{"@admin:chat.test": float64(100)}} {
-		c, s := testStore(t)
-		var puts atomic.Int32
-		mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case strings.HasSuffix(r.URL.Path, "/whoami"):
-				replyJSON(w, map[string]string{"user_id": "@agent_iris:chat.test"})
-			case strings.HasSuffix(r.URL.Path, "/org.hermes.fleet/"):
-				replyJSON(w, map[string]string{"agent": "iris", "server": "chat.test"})
-			case strings.Contains(r.URL.Path, "/state/m.room.member/"):
-				replyJSON(w, map[string]string{"membership": "join"})
-			case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
-				if r.Method == "PUT" {
-					puts.Add(1)
+// Reconciliation repairs an agent's room power levels and bot display name, and skips both when
+// they are already correct, so a restart does not rewrite state it does not need to change.
+func TestProvisionRepairsRoomPowerAndBotNameOnce(t *testing.T) {
+	cases := []struct {
+		name       string
+		levels     map[string]any
+		display    string
+		plWrites   int32
+		nameWrites int32
+	}{
+		{"repairs", map[string]any{}, "agent_iris", 1, 1},
+		{"already correct", map[string]any{"@admin:chat.test": float64(100)}, "iris", 0, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, s := testStore(t)
+			var puts, names atomic.Int32
+			mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/whoami"):
+					replyJSON(w, map[string]string{"user_id": "@agent_iris:chat.test"})
+				case strings.HasSuffix(r.URL.Path, "/org.hermes.fleet/"):
+					replyJSON(w, map[string]string{"agent": "iris", "server": "chat.test"})
+				case strings.Contains(r.URL.Path, "/state/m.room.member/"):
+					replyJSON(w, map[string]string{"membership": "join"})
+				case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
+					if r.Method == "PUT" {
+						puts.Add(1)
+					}
+					replyJSON(w, map[string]any{"users": tc.levels})
+				case strings.Contains(r.URL.Path, "/profile/"):
+					if r.Method == "PUT" {
+						names.Add(1)
+						var body map[string]string
+						json.NewDecoder(r.Body).Decode(&body)
+						if body["displayname"] != "iris" {
+							t.Errorf("display name %q does not match the agent", body["displayname"])
+						}
+					}
+					replyJSON(w, map[string]any{"displayname": tc.display})
+				default:
+					replyJSON(w, map[string]any{})
 				}
-				replyJSON(w, map[string]any{"users": existing})
-			default:
-				replyJSON(w, map[string]any{})
+			})
+			if err := mx.provision(context.Background(), s, "iris"); err != nil {
+				t.Fatal(err)
+			}
+			if puts.Load() != tc.plWrites || names.Load() != tc.nameWrites {
+				t.Fatalf("power writes = %d (want %d), name writes = %d (want %d)", puts.Load(), tc.plWrites, names.Load(), tc.nameWrites)
+			}
+			if s.View().Members["iris"].Rooms["!iris:chat.test"] == nil {
+				t.Fatal("provisioned room not tracked")
 			}
 		})
-		if err := mx.provision(context.Background(), s, "iris"); err != nil {
-			t.Fatal(err)
-		}
-		want := int32(1)
-		if existing.(map[string]any)["@admin:chat.test"] == float64(100) {
-			want = 0
-		}
-		if puts.Load() != want {
-			t.Fatalf("power level writes = %d, want %d", puts.Load(), want)
-		}
-		if s.View().Members["iris"].Rooms["!iris:chat.test"] == nil {
-			t.Fatal("provisioned room not tracked")
-		}
 	}
 }
 
@@ -1315,5 +1337,123 @@ func TestStartupInviteReconciliation(t *testing.T) {
 	}
 	if m := s.View().Members["iris"]; m.Since != "old-sync" {
 		t.Fatal("startup reconciliation advanced the sync cursor")
+	}
+}
+
+// stateEvent builds one room state event for a sync state block.
+func stateEvent(typ string, content map[string]any) map[string]any {
+	return map[string]any{"type": typ, "state_key": "", "sender": "@admin:chat.test", "content": content}
+}
+
+// joinedState is a joined room with a state block and an empty timeline.
+func joinedState(events ...any) map[string]any {
+	return map[string]any{"timeline": map[string]any{"events": []any{}}, "state": map[string]any{"events": events}}
+}
+
+// An agent greets a room once, when it is invited into it: not again on later syncs, not in its
+// own provisioned room, and not in a space. The greeting names the room and explains the reply
+// mode through the shipped command.
+func TestJoinIntroPostedOnceForInvitedRooms(t *testing.T) {
+	c, s := testStore(t)
+	team, unnamed, space := "!team:chat.test", "!unnamed:chat.test", "!space:chat.test"
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/state/m.room.name/") {
+			w.WriteHeader(404)
+			return
+		}
+		replyJSON(w, syncRooms(map[string]any{
+			"!iris:chat.test": joinedState(stateEvent("m.room.create", map[string]any{}), stateEvent("m.room.name", map[string]any{"name": "Iris"})),
+			team:              joinedState(stateEvent("m.room.create", map[string]any{}), stateEvent("m.room.name", map[string]any{"name": "Finance2"})),
+			unnamed:           joinedState(stateEvent("m.room.create", map[string]any{})),
+			space:             joinedState(stateEvent("m.room.create", map[string]any{"type": "m.space"})),
+		}))
+	})
+	for i := 0; i < 2; i++ {
+		if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := s.View().Members["iris"]
+	if len(m.Outbox) != 2 {
+		t.Fatalf("expected exactly one greeting per invited room, got %+v", m.Outbox)
+	}
+	greetings := map[string]string{}
+	for _, n := range m.Outbox {
+		greetings[n.ID] = n.Text
+	}
+	named := greetings[team+"-joined"]
+	if !strings.Contains(named, "Happy to join Finance2.") || !strings.Contains(named, "only when mentioned") || !strings.Contains(named, "!require_mention off") {
+		t.Fatalf("greeting does not explain the reply mode: %q", named)
+	}
+	if got := greetings[unnamed+"-joined"]; !strings.Contains(got, "Happy to join this room.") {
+		t.Fatalf("unnamed room not labelled: %q", got)
+	}
+	if m.Rooms[space] == nil {
+		t.Fatal("space not tracked")
+	}
+}
+
+func TestRoomLabelSanitisesUntrustedNames(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Finance2", "Finance2"},
+		{"two\nlines\tand  spaces", "two lines and spaces"},
+		{"", "this room"},
+		{"  \n\t ", "this room"},
+		{strings.Repeat("é", 100), strings.Repeat("é", 32)},
+	}
+	for _, tc := range cases {
+		got := roomLabel(tc.in)
+		if got != tc.want {
+			t.Fatalf("roomLabel(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if len(got) > 64 || !utf8.ValidString(got) || strings.ContainsAny(got, "\n\r\t") {
+			t.Fatalf("roomLabel(%q) produced unusable output %q", tc.in, got)
+		}
+	}
+}
+
+// One unwritable room must not silence every other room: a blocked entry is skipped, its own
+// room keeps FIFO order, and !resend brings it back.
+func TestBlockedReplyDoesNotStarveOtherRooms(t *testing.T) {
+	c, s := testStore(t)
+	var sent []string
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		sent = append(sent, r.URL.Path)
+		replyJSON(w, map[string]string{"event_id": "$sent"})
+	})
+	blocked, other := "!blocked:chat.test", "!other:chat.test"
+	s.Update(func(st *State) error {
+		m := st.Members["iris"]
+		m.Rooms[blocked], m.Rooms[other] = &Room{}, &Room{}
+		addNotice(m, "stuck", blocked, "", "undeliverable")
+		addNotice(m, "behind", blocked, "", "queued behind it")
+		addNotice(m, "fine", other, "", "deliverable")
+		m.Outbox[0].Attempts = 8
+		return nil
+	})
+	if err := mx.sendNext(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], other) {
+		t.Fatalf("blocked room starved another room: %v", sent)
+	}
+	m := s.View().Members["iris"]
+	if len(m.Outbox) != 2 || m.Outbox[0].ID != "stuck" || m.Outbox[1].ID != "behind" {
+		t.Fatalf("blocked entry was not preserved in order: %+v", m.Outbox)
+	}
+	s.Update(func(st *State) error {
+		for _, n := range st.Members["iris"].Outbox {
+			n.Attempts, n.Next = 0, time.Time{}
+		}
+		return nil
+	})
+	if err := mx.sendNext(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 2 || !strings.Contains(sent[1], blocked) {
+		t.Fatalf("retry did not resume the blocked room first: %v", sent)
+	}
+	if m = s.View().Members["iris"]; len(m.Outbox) != 1 || m.Outbox[0].ID != "behind" {
+		t.Fatalf("same-room order broken: %+v", m.Outbox)
 	}
 }

@@ -392,6 +392,24 @@ func addNotice(m *Member, id, room, thread, text string) {
 	}
 	m.Outbox = append(m.Outbox, &Notice{ID: id, Room: room, Thread: thread, Text: text})
 }
+
+// noticeIndex locates a queued reply by ID. The outbox is shared by every room an agent serves,
+// so entries are addressed by ID rather than by position.
+func noticeIndex(m *Member, id string) int {
+	for i, n := range m.Outbox {
+		if n.ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// removeNotice drops one queued reply, keeping the rest of the queue intact.
+func removeNotice(m *Member, id string) {
+	if i := noticeIndex(m, id); i >= 0 {
+		m.Outbox = append(m.Outbox[:i], m.Outbox[i+1:]...)
+	}
+}
 func findTurn(m *Member, id string) *Turn {
 	for _, t := range m.Turns {
 		if t.ID == id {

@@ -17,12 +17,21 @@ Element Web and see their private agent rooms: no signup, room invitations,
 mentions, tokens, homeserver selection or required device verification.
 
 The user can also create their own spaces and rooms, invite an agent's bot into
-them, and the bot joins and answers there like any other member. In a room the
-user created the agent answers when mentioned by default; `!require_mention off`
-in that room makes it answer everything, and `!require_mention on` restores the
-mention requirement. The agent's own provisioned room never needs a mention, and
-a space is joined but never answered in. Invitations from other agents' bots are
-refused, so agents cannot wake each other. See
+them, and the bot joins, greets the room once, and answers there like any other
+member. The greeting names the room, states that the agent replies only when
+mentioned, and gives the command that changes it:
+
+> Happy to join Finance2. Reply mode: only when mentioned — send
+> `!require_mention off` here if you would rather I answer every eligible message.
+> `!menu` shows the controls.
+
+In a room the user created the agent answers when mentioned by default;
+`!require_mention off` in that room makes it answer everything, and
+`!require_mention on` restores the mention requirement. The agent's own
+provisioned room never needs a mention, and a space is joined but never answered
+in. Invitations from other agents' bots are refused, so agents cannot wake each
+other, and each bot is named after its agent so Element's mention picker shows
+`Finance2`'s agent rather than an internal `agent_` localpart. See
 [the functional spec](docs/functional-spec.md) §5 for the access-model details.
 
 Ordinary messages use the selected conversation in that room. `!new` starts fresh
@@ -198,7 +207,9 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   and never bypasses existing sender/bot checks. Commands and valid menu reactions
   are mention-exempt, except that a command in a room shared by several fleet bots
   must address the intended agent (`!stop` stays global). Changing it does not wake
-  Hermes.
+  Hermes. An agent invited into a room says so once, in a greeting that names the
+  room and this command; the greeting comes from the durable reply outbox, so it is
+  delivered exactly once and never repeats after a restart.
 
 Reaction menus target **Element X on mobile and bundled Element Web on desktop**;
 actual Element X tapping remains an acceptance check, not a verified deployment

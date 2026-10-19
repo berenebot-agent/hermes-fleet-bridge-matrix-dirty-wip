@@ -25,6 +25,19 @@ stale blocking questions for the next implementer.
   the Reply mode reaction menu: never
   required in the agent's provisioned room, required by default in rooms the user
   created. Per-agent configuration was rejected as more surface for the same result.
+- An agent invited into a room posts one greeting: it names the room, says it replies
+  only when mentioned, and gives `!require_mention off` as the way to change that. It
+  is queued through the durable reply outbox when the room is first tracked, so it is
+  delivered exactly once, cannot repeat after a restart, and a space or a room the
+  operator already had gets none. Room names are untrusted, so the label is one line,
+  bounded and free of control characters, and only ever appears in that message.
+- Each bot is named after its agent (`purple-shirt-3`, not `agent_purple-shirt-3`) and
+  the name is repaired on reconciliation, so Element's member list and mention picker
+  are usable. The greeting depends on this being true.
+- The reply outbox is shared by every room an agent serves, so dispatch picks the next
+  *deliverable* entry and skips a room whose head entry is cooling down or has
+  exhausted its attempts. Per-room order is preserved, one unwritable room cannot
+  silence the agent elsewhere, and `!resend` still resumes the skipped room.
 - Commands stay mention-exempt, except in a room where several fleet agents' bots are
   members: an unaddressed command is refused with a message naming the sender's
   intended agent, because acting in every bot at once is ambiguous. `!stop` is the

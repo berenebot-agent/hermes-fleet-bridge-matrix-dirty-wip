@@ -216,6 +216,9 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 	if e = m.grantAdmin(ctx, r.Room, bot.Token, admin.User); e != nil {
 		return e
 	}
+	if e = m.nameBot(ctx, bot, id); e != nil {
+		return e
+	}
 	return s.Update(func(st *State) error {
 		member := st.Members[id]
 		member.Room = r.Room
@@ -227,6 +230,22 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 		}
 		return nil
 	})
+}
+
+// nameBot gives the bot the agent's own name, so Element's member list and mention picker show
+// the agent instead of the internal agent_ localpart. Reconciliation skips an unchanged name.
+func (m *Matrix) nameBot(ctx context.Context, bot Credential, display string) error {
+	path := "/_matrix/client/v3/profile/" + url.PathEscape(bot.User) + "/displayname"
+	var profile struct {
+		DisplayName string `json:"displayname"`
+	}
+	if e := api(ctx, "GET", m.Base, path, bot.Token, nil, &profile, nil); e != nil {
+		return e
+	}
+	if profile.DisplayName == display {
+		return nil
+	}
+	return api(ctx, "PUT", m.Base, path, bot.Token, map[string]string{"displayname": display}, nil, nil)
 }
 
 // grantAdmin gives the configured administrator real power in the agent's room. Tuwunel's
@@ -269,7 +288,9 @@ type Event struct {
 		Membership string `json:"membership"`
 		// CreateType is the m.room.create content type, which marks a space.
 		CreateType string `json:"type"`
-		Mentions   struct {
+		// Name is the m.room.name content, used to label a room the agent was invited to.
+		Name     string `json:"name"`
+		Mentions struct {
 			UserIDs []string `json:"user_ids"`
 		} `json:"m.mentions"`
 		Relation struct {
@@ -352,7 +373,10 @@ type roomScan struct {
 	mention bool
 	space   bool
 	last    string
-	turns   []*Turn
+	// intro is the join greeting queued when this agent is first invited into the room. It is
+	// empty for the agent's own provisioned room, which was not joined by invitation.
+	intro string
+	turns []*Turn
 	// rejects holds event IDs of commands refused as ambiguous in a room shared by several
 	// fleet bots; they never become turns, only an outbound explanation.
 	rejects []string
@@ -450,19 +474,61 @@ func addressedElsewhere(ev Event, bot Credential) bool {
 
 // roomIsSpace reports whether a room is a space container. Sync state answers it for newly
 // joined rooms; otherwise the create event is fetched once and cached on the room.
-func (mx *Matrix) roomIsSpace(ctx context.Context, token, room string, state []Event) (bool, error) {
+// roomMeta describes a newly joined room: the label used in the join intro, and whether it is a
+// space (a container this bot joins but never answers in). Sync state usually carries both; the
+// create and name events are fetched only when the state block omits them.
+func (mx *Matrix) roomMeta(ctx context.Context, token, room string, state []Event) (string, bool, error) {
+	name, space, seenCreate := "", false, false
 	for _, ev := range state {
-		if ev.Type == "m.room.create" {
-			return ev.Content.CreateType == "m.space", nil
+		switch ev.Type {
+		case "m.room.create":
+			space, seenCreate = ev.Content.CreateType == "m.space", true
+		case "m.room.name":
+			name = ev.Content.Name
 		}
 	}
-	var create struct {
-		Type string `json:"type"`
+	if !seenCreate {
+		var create struct {
+			Type string `json:"type"`
+		}
+		if e := api(ctx, "GET", mx.Base, roomPath(room)+"/state/m.room.create/", token, nil, &create, nil); e != nil {
+			return "", false, e
+		}
+		space = create.Type == "m.space"
 	}
-	if e := api(ctx, "GET", mx.Base, roomPath(room)+"/state/m.room.create/", token, nil, &create, nil); e != nil {
-		return false, e
+	if name == "" && !space {
+		var named struct {
+			Name string `json:"name"`
+		}
+		if e := api(ctx, "GET", mx.Base, roomPath(room)+"/state/m.room.name/", token, nil, &named, nil); e != nil && !httpStatus(e, 404) {
+			return "", false, e
+		}
+		name = named.Name
 	}
-	return create.Type == "m.space", nil
+	return roomLabel(name), space, nil
+}
+
+// roomLabel renders a room name for the join intro: a single line, length-bounded, or "this
+// room" when the room has no usable name. Room names are untrusted input.
+func roomLabel(name string) string {
+	name = strings.Join(strings.Fields(name), " ")
+	if len(name) > 64 {
+		name = name[:64]
+		for len(name) > 0 && !utf8.ValidString(name) {
+			name = name[:len(name)-1]
+		}
+	}
+	if name == "" {
+		return "this room"
+	}
+	return name
+}
+
+// joinIntro is the first message an agent posts where it was invited, so the operator learns what
+// the agent does there and how to change it. Membership is the access boundary, so a room the
+// operator created starts mention-only.
+func joinIntro(room string) string {
+	return "Happy to join " + room + ". Reply mode: only when mentioned — send !require_mention off here if you would rather I answer every eligible message. !menu shows the controls."
 }
 
 func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
@@ -494,11 +560,16 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 		if known := m.Rooms[room]; known != nil {
 			scan.mention, scan.space, scan.last = known.Mention, known.Space, known.LastEvent
 		} else {
-			space, e := mx.roomIsSpace(ctx, bot.Token, room, joined.State.Events)
+			label, space, e := mx.roomMeta(ctx, bot.Token, room, joined.State.Events)
 			if e != nil {
 				return e
 			}
 			scan.space = space
+			// The invite acceptance step is the only place a greeting is posted: the agent's own
+			// room was not joined by invitation, and a space is not a conversation.
+			if room != m.Room && !space {
+				scan.intro = joinIntro(label)
+			}
 		}
 		if room == m.Room {
 			scan.mention = false
@@ -591,6 +662,11 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			if tracked == nil {
 				tracked = &Room{Mention: scan.mention, Space: scan.space}
 				current.Rooms[room] = tracked
+				if scan.intro != "" {
+					// Queued through the reply outbox so the greeting is durable, retried, and
+					// delivered exactly once: the room record that carries it is persisted first.
+					addNotice(current, room+"-joined", room, "", scan.intro)
+				}
 			}
 			tracked.Space = scan.space
 			if room == current.Room {
@@ -725,13 +801,37 @@ func chunks(text string) []string {
 	}
 	return append(out, text)
 }
+
+// nextNotice picks the reply to attempt next. The outbox is shared by every room an agent
+// serves, so one unwritable room must not stall the others: a room whose head entry is still
+// cooling down or has exhausted its attempts is skipped whole, which keeps FIFO order inside
+// each room while letting every other room make progress.
+func nextNotice(m *Member) *Notice {
+	blocked := map[string]bool{}
+	for _, n := range m.Outbox {
+		room := n.Room
+		if room == "" {
+			room = m.Room
+		}
+		if blocked[room] {
+			continue
+		}
+		if time.Now().Before(n.Next) || n.Attempts >= 8 {
+			blocked[room] = true
+			continue
+		}
+		return n
+	}
+	return nil
+}
+
 func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	m := s.View().Members[id]
 	if len(m.Outbox) == 0 {
 		return nil
 	}
-	n := m.Outbox[0]
-	if time.Now().Before(n.Next) || n.Attempts >= 8 {
+	n := nextNotice(m)
+	if n == nil {
 		return nil
 	}
 	room := n.Room
@@ -742,10 +842,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 		// The bot is no longer in this room; drop the reply instead of blocking every later
 		// reply behind an undeliverable head.
 		return s.Update(func(st *State) error {
-			a := st.Members[id]
-			if len(a.Outbox) > 0 && a.Outbox[0].ID == n.ID {
-				a.Outbox = a.Outbox[1:]
-			}
+			removeNotice(st.Members[id], n.ID)
 			return nil
 		})
 	}
@@ -771,10 +868,11 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	}
 	return s.Update(func(st *State) error {
 		a := st.Members[id]
-		if len(a.Outbox) == 0 || a.Outbox[0].ID != n.ID {
+		i := noticeIndex(a, n.ID)
+		if i < 0 {
 			return nil
 		}
-		v := a.Outbox[0]
+		v := a.Outbox[i]
 		if e != nil {
 			v.Attempts++
 			v.Next = time.Now().Add(time.Duration(1<<min(v.Attempts, 6)) * time.Second)
@@ -791,7 +889,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 		}
 		v.Sent++
 		if v.Sent == len(parts) {
-			a.Outbox = a.Outbox[1:]
+			a.Outbox = append(a.Outbox[:i], a.Outbox[i+1:]...)
 		}
 		return nil
 	})
@@ -800,17 +898,15 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 func (mx *Matrix) seedMenu(ctx context.Context, s *Store, id string, notice *Notice, bot Credential) error {
 	for {
 		m := s.View().Members[id]
-		if len(m.Outbox) == 0 || m.Outbox[0].ID != notice.ID {
+		i := noticeIndex(m, notice.ID)
+		if i < 0 {
 			return nil
 		}
-		n := m.Outbox[0]
+		n := m.Outbox[i]
 		menu := m.Menus[n.MenuID]
 		if menu == nil || !menuValid(m, menu) || n.Reaction >= len(menu.Options) {
 			return s.Update(func(st *State) error {
-				a := st.Members[id]
-				if len(a.Outbox) > 0 && a.Outbox[0].ID == n.ID {
-					a.Outbox = a.Outbox[1:]
-				}
+				removeNotice(st.Members[id], n.ID)
 				return nil
 			})
 		}
@@ -825,10 +921,11 @@ func (mx *Matrix) seedMenu(ctx context.Context, s *Store, id string, notice *Not
 		}
 		if updateErr := s.Update(func(st *State) error {
 			a := st.Members[id]
-			if len(a.Outbox) == 0 || a.Outbox[0].ID != n.ID {
+			j := noticeIndex(a, n.ID)
+			if j < 0 {
 				return nil
 			}
-			v := a.Outbox[0]
+			v := a.Outbox[j]
 			if err != nil {
 				v.Attempts++
 				v.Next = time.Now().Add(time.Duration(1<<min(v.Attempts, 6)) * time.Second)

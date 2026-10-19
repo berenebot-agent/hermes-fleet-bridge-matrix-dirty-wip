@@ -21,6 +21,44 @@ Application images contain the controller, static Element assets, Tuwunel and
 Docker CLI/Compose in one service. Third-party licences are copied with pinned
 checksums and served under `/licenses/`. No third-party Go modules.
 
+## Join greeting, bot name and reply dispatch (2026-10-19)
+
+An agent invited into a room now greets it once, each bot is named after its agent, and
+reply dispatch skips a stuck room instead of stalling every other room. No new
+dependency, service or configuration option.
+
+Passed through the Docker wrapper: `gofmt -l .`, `vet ./...` and the full local
+`test -race ./...` suite. The final race log is
+`tests/logs/hermes-fleet-bridge-matrix-go/20261019T064347-go-test_-race_-count=1_._...-2128108.log`.
+
+New fake-endpoint coverage: exactly one greeting per invited room, with the room's own
+name in it and none for a space, the agent's own provisioned room or an already-tracked
+room; unusable room names (empty, whitespace, control characters, over 64 bytes) are
+flattened, bounded and fall back to "this room"; the greeting names `!require_mention
+off` as the way to change the mode; dispatch delivers another room while one room's head
+entry is cooling down or exhausted its attempts, keeps that room's entries in order, and
+resumes it first once attempts reset (`!resend`); provisioning repairs the bot's display
+name while skipping the write when it already matches.
+
+Also verified against the running local deployment, three provisioned agents:
+
+1. Reconciliation renamed every bot to its agent (`purple-shirt-1` … `-3`); the profile
+   API then reported the agent name for all three, where it previously held the internal
+   `agent_` localpart.
+2. Inviting an agent's bot into an operator room joined it and posted exactly one
+   greeting there: `Happy to join Fiannce. Reply mode: only when mentioned — send
+   !require_mention off here if you would rather I answer every eligible message. !menu
+   shows the controls.` The room became mention-required and the greeting left the outbox
+   after delivery.
+3. A plain message in that freshly joined room produced no turn, no reply and no agent
+   container start: the mode the greeting states is the mode the agent applies.
+4. No greeting appeared for the agent's own provisioned room, for a space, or for rooms
+   tracked before this build.
+
+**Not run for this change:** real-provider runs (the mention-to-reply path is unchanged
+from the previous build and is covered by the existing suite), Element rendering of the
+greeting next to the invite banner, and Element X behaviour.
+
 ## Media extension (2026-10-19)
 
 Implementation/tests and push were explicitly authorized. No subagents, real
