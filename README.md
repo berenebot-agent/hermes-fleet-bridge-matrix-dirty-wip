@@ -153,6 +153,11 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
 - `!menu`, `!help` — fresh controls with bot-seeded, tappable reaction choices.
   Navigate to status, models, conversations, context/usage, reply mode, stop and
   command help. No widgets, client forks, composer type-ahead or modal dialogs.
+  In a room where **more than one of the fleet's agents has a bot**, commands must
+  address the intended one (`@agent_iris:chat.example !menu`); a bare command is
+  refused with a message naming that agent. `!stop` is the exception and still
+  stops every agent's conversation in that room. A room with a single bot — a DM,
+  or the agent's own provisioned room — never needs an address.
 - `!status` — queue/run information without waking.
 - `!models [filter]` — paginated configured model/provider choices, with advertised
   route IDs as a fallback (not a guarantee that every route is configured). Can wake
@@ -184,7 +189,9 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   mentioned / Every eligible message. The dedicated room is fixed to Always
   responds. Policy is per agent/room, survives restarts and conversation switches,
   and never bypasses existing sender/bot checks. Commands and valid menu reactions
-  are mention-exempt. Changing it does not wake Hermes.
+  are mention-exempt, except that a command in a room shared by several fleet bots
+  must address the intended agent (`!stop` stays global). Changing it does not wake
+  Hermes.
 
 Reaction menus target **Element X on mobile and bundled Element Web on desktop**;
 actual Element X tapping remains an acceptance check, not a verified deployment

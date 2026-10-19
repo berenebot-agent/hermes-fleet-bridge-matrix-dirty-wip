@@ -1076,6 +1076,40 @@ func TestMentionPolicyAndSpaceContainers(t *testing.T) {
 	}
 }
 
+// A bare command in a room several fleet bots share is refused with a pointer instead of acting
+// in every bot at once; an addressed command, !stop, a single-bot room and the agent's own
+// provisioned room are unaffected.
+func TestSharedRoomCommandsRequireAddressing(t *testing.T) {
+	c, s := testStore(t)
+	team, solo := "!team:chat.test", "!solo:chat.test"
+	s.Update(func(st *State) error {
+		st.Members["iris"].Rooms[team] = &Room{}
+		st.Members["iris"].Rooms[solo] = &Room{}
+		st.Members["zed"] = &Member{ID: "zed", Enabled: true, Room: "!zed:chat.test", Rooms: map[string]*Room{team: {}}, Sessions: map[string]map[string]*Session{}}
+		return nil
+	})
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		replyJSON(w, syncRooms(map[string]any{
+			"!iris:chat.test": map[string]any{"timeline": map[string]any{"events": []any{message("$own", "@admin:chat.test", "!menu", "")}}},
+			team:              map[string]any{"timeline": map[string]any{"events": []any{message("$bare", "@admin:chat.test", "!menu", ""), message("$stop", "@admin:chat.test", "!stop", ""), addressed("$talk", "!menu")}}},
+			solo:              map[string]any{"timeline": map[string]any{"events": []any{message("$lone", "@admin:chat.test", "!menu", "")}}},
+		}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if findTurn(m, "$bare") != nil {
+		t.Fatal("ambiguous command dispatched in a shared room")
+	}
+	if findTurn(m, "$stop") == nil || findTurn(m, "$talk") == nil || findTurn(m, "$lone") == nil || findTurn(m, "$own") == nil {
+		t.Fatalf("addressed command, !stop, single-bot room or own room refused: %+v", m.Turns)
+	}
+	if len(m.Outbox) != 1 || m.Outbox[0].ID != "$bare-ambiguous" || m.Outbox[0].Room != team || !strings.Contains(m.Outbox[0].Text, "@agent_iris:chat.test") {
+		t.Fatalf("ambiguous command did not get one addressed explanation: %+v", m.Outbox)
+	}
+}
+
 func TestRequireMentionCommandTogglesPerRoom(t *testing.T) {
 	engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { replyJSON(w, map[string]any{}) })
 	room := "!team:chat.test"

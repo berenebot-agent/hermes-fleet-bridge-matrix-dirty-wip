@@ -88,6 +88,9 @@ Fake-endpoint tests cover:
 - Per-room mention policy: no mention needed in the provisioned room, mention needed
   in an operator-created room, mention stripped before dispatch, commands exempt, and
   `!require_mention on|off` persisting the setting per room.
+- Shared-room commands: with two agents' bots in one room, a bare command is refused
+  with one explanation naming the agent, an addressed command and `!stop` still
+  dispatch, and a single-bot room and the agent's own room are unaffected.
 - Space containers are tracked and joined but never dispatched from.
 - Invitation handling: a human invitation joins, a bot invitation never joins, and
   startup reconciliation accepts a pending invitation without moving the sync cursor.

@@ -345,6 +345,9 @@ type roomScan struct {
 	space   bool
 	last    string
 	turns   []*Turn
+	// rejects holds event IDs of commands refused as ambiguous in a room shared by several
+	// fleet bots; they never become turns, only an outbound explanation.
+	rejects []string
 }
 
 // localUser returns the localpart of a Matrix user ID, lowercased.
@@ -361,6 +364,18 @@ func localUser(user string) string {
 func botSender(user string) bool {
 	la := localUser(user)
 	return strings.HasPrefix(la, "agent_") || strings.HasPrefix(la, "agent.") || strings.HasPrefix(la, "agent-")
+}
+
+// otherBots reports whether another enabled agent bot shares this room. Agents track their own
+// joined rooms, so this needs no extra Matrix call. The current agent is excluded, because its
+// own room entry is only written when this sync window is applied.
+func otherBots(st State, id, room string) bool {
+	for other, member := range st.Members {
+		if other != id && member.Enabled && member.Rooms[room] != nil && !member.Rooms[room].Space {
+			return true
+		}
+	}
+	return false
 }
 
 // mentioned reports whether a message addresses the agent: an explicit Matrix mention, or the
@@ -412,7 +427,8 @@ func (mx *Matrix) roomIsSpace(ctx context.Context, token, room string, state []E
 }
 
 func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
-	m := s.View().Members[id]
+	view := s.View()
+	m := view.Members[id]
 	bot := mx.cred("agent_" + id)
 	if m.Room == "" || bot.Token == "" {
 		return errors.New("agent room or bot credentials unavailable")
@@ -496,6 +512,15 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			if strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
+			// A command that does not address this agent is ambiguous once several fleet bots
+			// share the room, so refuse it with a pointer rather than acting in every bot at
+			// once. !stop stays global; a single-bot room and the agent's own provisioned room
+			// never need a mention.
+			if t.Kind == "command" && room != m.Room && !mentioned(ev, bot) &&
+				strings.Fields(t.Text)[0] != "!stop" && otherBots(view, id, room) {
+				scan.rejects = append(scan.rejects, t.ID)
+				continue
+			}
 			// In a room the operator created the bot behaves like any other member and answers
 			// when addressed; in its own room a mention is never required.
 			if t.Kind == "" && scan.mention && !mentioned(ev, bot) {
@@ -558,6 +583,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 					addNotice(current, t.ID+"-busy", room, t.Thread, "Agent queue is full (100 turns); nothing was dispatched. Try again later.")
 				}
 				current.Turns = append(current.Turns, t)
+			}
+			for _, rejected := range scan.rejects {
+				addNotice(current, rejected+"-ambiguous", room, "", "Multiple agents are in this room; address the one you want ("+bot.User+" !menu). An unaddressed !stop still stops every agent here.")
 			}
 		}
 		// A room the bot has left stops being served; a later re-invite starts a fresh

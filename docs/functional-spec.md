@@ -117,7 +117,7 @@ Membership is the access boundary: anyone who can post in a room the bot has joi
 
 - The bot joins any room or space an **approved human** invites it to, including invitations already pending at startup. Invitations from bot accounts (`agent_*`) are never accepted, so agents cannot wake each other.
 - Each room the bot serves has its own backfill anchor, mention policy, selected conversation and retained bridge-managed conversation inventory.
-- **Mention policy is per agent/room.** The provisioned room never requires a mention and cannot be switched to mention-only mode; a room the operator created requires one until `!require_mention off` is run in that room. Commands and valid menu reactions are always processed without a mention. The menu calls this Reply mode; changing it neither wakes Hermes nor changes conversation selection.
+- **Mention policy is per agent/room.** The provisioned room never requires a mention and cannot be switched to mention-only mode; a room the operator created requires one until `!require_mention off` is run in that room. Commands and valid menu reactions are always processed without a mention, except in a room shared by several of the fleet's agents' bots, where an unaddressed command is refused with a message naming the agent the sender should address (`!stop` stays global and acts in every bot's conversation there). The menu calls this Reply mode; changing it neither wakes Hermes nor changes conversation selection.
 - A **space** is joined but never dispatched from: it is a container, not a conversation.
 - Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and other non-text events. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
 - Replies are routed back to the room and thread they came from. A room the bot is removed from stops being served; a later re-invite starts a fresh conversation.
@@ -188,7 +188,7 @@ Prioritize and test:
 | `!context` | Explicit native-context HTTP API blocker; no fabricated occupancy or internal-file scraping |
 | `!usage` | Verified cumulative session counters, separately labelled as not context occupancy; may wake Hermes |
 | `!approve <request-id>`, `!deny <request-id>` | This originating room/thread/session/run/exact request only; approve once or deny, never blanket grants |
-| `!require_mention on\|off` | Reply mode in additional rooms; dedicated room fixed to Always responds. Persisted per agent/room, commands/menu reactions exempt |
+| `!require_mention on\|off` | Reply mode in additional rooms; dedicated room fixed to Always responds. Persisted per agent/room, commands/menu reactions exempt except an unaddressed command in a room shared by several fleet bots, which is refused with a pointer to the intended agent (`!stop` stays global) |
 | Background tasks | Only activity observable through the Hermes API contributes to idle safety; no arbitrary job-administration UI |
 
 **Mandatory feasibility gate:** Check the *actual Hermes HTTP API* for model selection, context inspection, cancellation, and approvals; do not assume Hermes native Matrix adapter features are automatically available to an API-based bridge. Unsupported commands must explain the limitation, not fake success. Model, context and stop are high-priority integration acceptance items.
@@ -242,7 +242,7 @@ Actual Element X tap behavior is a separate acceptance check, not yet verified.
 8. `!menu`, `!help` and `!status` operate. Reaction choices, model chat/global scope, context/usage distinctions and cancellation pass fake-endpoint tests; real API/client checks have explicit status and blockers.
 9. Bridge restart does not duplicate accounts or rooms. Adding a directory provisions a new agent; removing it does not delete message history.
 10. Messages from bot accounts or from rooms the bot has not joined cannot wake Hermes or access private agent rooms; a member of a joined room can.
-11. An agent invited to a room answers there when mentioned, without a mention after `!require_mention off`, and never answers in a space; an invitation pending at startup is accepted on the next start.
+11. An agent invited to a room answers there when mentioned, without a mention after `!require_mention off`, and never answers in a space; an invitation pending at startup is accepted on the next start. When several agents' bots share one room, an unaddressed command is refused with a pointer to the intended agent, `!stop` still acts, and a single-bot room is unaffected.
 12. Automated tests cover initialization failure, permission errors, cold starts, durability, deduplication, recovery and the state upgrade.
 
 ## 12. Technical feasibility spikes before implementation

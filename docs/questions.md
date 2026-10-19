@@ -25,6 +25,12 @@ stale blocking questions for the next implementer.
   the Reply mode reaction menu: never
   required in the agent's provisioned room, required by default in rooms the user
   created. Per-agent configuration was rejected as more surface for the same result.
+- Commands stay mention-exempt, except in a room where several fleet agents' bots are
+  members: an unaddressed command is refused with a message naming the sender's
+  intended agent, because acting in every bot at once is ambiguous. `!stop` is the
+  exception and remains global, stopping every agent's conversation in that room.
+  "Several" is derived from the per-agent room records sync already maintains, so no
+  extra homeserver call is made; detection is therefore as fresh as each agent's sync.
 - The bridge grants the human administrator power level 100 in each provisioned room
   and repairs it on reconciliation. Tuwunel's `private_chat` preset leaves an invitee
   at power level 0, which blocks renaming a room and filing it into a space: Element
