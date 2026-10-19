@@ -267,6 +267,7 @@ type Event struct {
 		Relation struct {
 			Type  string `json:"rel_type"`
 			ID    string `json:"event_id"`
+			Key   string `json:"key"`
 			Reply *struct {
 				ID string `json:"event_id"`
 			} `json:"m.in_reply_to"`
@@ -419,7 +420,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	// One sync stream per agent covers its provisioned room plus every room the bot was invited
 	// to. Timeline entries are capped per room so a full fleet stays inside the response limit,
 	// and no room restriction is set because invites are only visible without one.
-	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]any{"limit": 50, "types": []string{"m.room.message"}}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
+	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]any{"limit": 50, "types": []string{"m.room.message", "m.reaction"}}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
 	q := url.Values{"timeout": {"25000"}, "filter": {filter}}
 	if m.Since != "" {
 		q.Set("since", m.Since)
@@ -444,6 +445,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			}
 			scan.space = space
 		}
+		if room == m.Room {
+			scan.mention = false
+		}
 		if scan.space {
 			// A space is a container, not a conversation: join it, never dispatch from it.
 			scans[room] = scan
@@ -463,53 +467,21 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				events = append(prefix, events...)
 			}
 		}
-		roots, broken := map[string]string{}, map[string]bool{}
-		for _, ev := range events {
-			if botSender(ev.Sender) || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" || ev.Content.Relation.Type != "m.thread" {
-				continue
-			}
-			root := ev.Content.Relation.ID
-			if root == "" || len(root) > 255 {
-				if room == m.Room {
-					return errors.New("invalid Matrix thread relation")
-				}
-				broken[root] = true
-				continue
-			}
-			if broken[root] {
-				continue
-			}
-			if _, seen := roots[root]; seen {
-				continue
-			}
-			var origin Event
-			if e := api(ctx, "GET", mx.Base, roomPath(room)+"/event/"+url.PathEscape(root), bot.Token, nil, &origin, nil); e != nil {
-				if room == m.Room {
-					return errors.New("cannot validate thread root; sync cursor retained")
-				}
-				broken[root] = true
-				continue
-			}
-			if origin.Type != "m.room.message" || (botSender(origin.Sender) && origin.Sender != bot.User) {
-				if room == m.Room {
-					return errors.New("thread root is not an approved conversation event")
-				}
-				broken[root] = true
-				continue
-			}
-			roots[root] = origin.Content.Body
-		}
 		for _, ev := range events {
 			if ev.ID == "" {
 				continue
 			}
 			scan.last = ev.ID
+			if ev.Type == "m.reaction" && !botSender(ev.Sender) && ev.Content.Relation.Type == "m.annotation" {
+				scan.turns = append(scan.turns, &Turn{ID: ev.ID, Room: room, Sender: ev.Sender, MenuID: ev.Content.Relation.ID, Choice: ev.Content.Relation.Key, Text: "!menu-choice", Kind: "command", Phase: "queued", Created: time.Now().UTC()})
+				continue
+			}
 			if botSender(ev.Sender) || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" {
 				continue
 			}
 			thread := ""
 			if ev.Content.Relation.Type != "" {
-				if ev.Content.Relation.Type != "m.thread" || broken[ev.Content.Relation.ID] {
+				if ev.Content.Relation.Type != "m.thread" {
 					continue
 				}
 				thread = ev.Content.Relation.ID
@@ -520,7 +492,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 					text = text[pos+2:]
 				}
 			}
-			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Text: stripMention(text, bot), Root: roots[thread], Phase: "queued", Created: time.Now().UTC()}
+			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot), Phase: "queued", Created: time.Now().UTC()}
 			if strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
@@ -545,14 +517,33 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				current.Rooms[room] = tracked
 			}
 			tracked.Space = scan.space
+			if room == current.Room {
+				tracked.Mention = false
+			}
 			if scan.last != "" {
 				tracked.LastEvent = scan.last
 			}
 			for _, t := range scan.turns {
+				if t.MenuID != "" {
+					menuID := ""
+					for key, menu := range current.Menus {
+						if menu.EventID != "" && menu.EventID == t.MenuID && menu.Room == room && menu.Owner == t.Sender {
+							menuID = key
+							break
+						}
+					}
+					if menuID == "" {
+						continue
+					}
+					t.MenuID = menuID
+				}
 				if findTurn(current, t.ID) != nil {
 					continue
 				}
-				if !current.Enabled && t.Kind == "" {
+				if t.Thread != "" {
+					t.Phase = "done"
+					addNotice(current, t.ID+"-thread", room, "", "Thread prompts and commands are unsupported. Use this room’s main chat and !menu → Conversations → New / Resume. Existing thread history was preserved.")
+				} else if !current.Enabled && t.Kind == "" {
 					if room != m.Room {
 						// A removed agent does not announce itself in operator-created rooms.
 						continue
@@ -577,6 +568,11 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			}
 			delete(current.Rooms, room)
 			delete(current.Sessions, room)
+			for key, menu := range current.Menus {
+				if menu.Room == room {
+					delete(current.Menus, key)
+				}
+			}
 			for _, t := range current.Turns {
 				if t.Room == room && t.Kind == "" && (t.Phase == "queued" || t.Phase == "processing") {
 					t.Phase = "done"
@@ -673,6 +669,9 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	}
 	parts := chunks(n.Text)
 	bot := mx.cred("agent_" + id)
+	if n.MenuID != "" && n.EventID != "" {
+		return mx.seedMenu(ctx, s, id, n, bot)
+	}
 	content := map[string]any{"msgtype": "m.text", "body": parts[n.Sent]}
 	if n.Thread != "" {
 		content["m.relates_to"] = map[string]any{"rel_type": "m.thread", "event_id": n.Thread, "is_falling_back": true, "m.in_reply_to": map[string]string{"event_id": n.Thread}}
@@ -698,12 +697,69 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 		}
 		v.Attempts = 0
 		v.Next = time.Time{}
+		if v.MenuID != "" {
+			v.EventID = r.ID
+			if menu := a.Menus[v.MenuID]; menu != nil {
+				menu.EventID = r.ID
+			}
+			return nil
+		}
 		v.Sent++
 		if v.Sent == len(parts) {
 			a.Outbox = a.Outbox[1:]
 		}
 		return nil
 	})
+}
+
+func (mx *Matrix) seedMenu(ctx context.Context, s *Store, id string, notice *Notice, bot Credential) error {
+	for {
+		m := s.View().Members[id]
+		if len(m.Outbox) == 0 || m.Outbox[0].ID != notice.ID {
+			return nil
+		}
+		n := m.Outbox[0]
+		menu := m.Menus[n.MenuID]
+		if menu == nil || !menuValid(m, menu) || n.Reaction >= len(menu.Options) {
+			return s.Update(func(st *State) error {
+				a := st.Members[id]
+				if len(a.Outbox) > 0 && a.Outbox[0].ID == n.ID {
+					a.Outbox = a.Outbox[1:]
+				}
+				return nil
+			})
+		}
+		key := menu.Options[n.Reaction].Key
+		content := map[string]any{"m.relates_to": map[string]string{"rel_type": "m.annotation", "event_id": n.EventID, "key": key}}
+		var response struct {
+			ID string `json:"event_id"`
+		}
+		err := api(ctx, "PUT", mx.Base, roomPath(n.Room)+"/send/m.reaction/"+stableID(id, n.ID, "reaction", key), bot.Token, content, &response, nil)
+		if err == nil && response.ID == "" {
+			err = errors.New("Matrix reaction send returned no event ID")
+		}
+		if updateErr := s.Update(func(st *State) error {
+			a := st.Members[id]
+			if len(a.Outbox) == 0 || a.Outbox[0].ID != n.ID {
+				return nil
+			}
+			v := a.Outbox[0]
+			if err != nil {
+				v.Attempts++
+				v.Next = time.Now().Add(time.Duration(1<<min(v.Attempts, 6)) * time.Second)
+			} else {
+				v.Reaction++
+				v.Attempts = 0
+				v.Next = time.Time{}
+			}
+			return nil
+		}); updateErr != nil {
+			return updateErr
+		}
+		if err != nil {
+			return nil
+		}
+	}
 }
 func (mx *Matrix) typing(ctx context.Context, m *Member, room string, on bool) {
 	bot := mx.cred("agent_" + m.ID)

@@ -21,7 +21,53 @@ Application images contain the controller, static Element assets, Tuwunel and
 Docker CLI/Compose in one service. Third-party licences are copied with pinned
 checksums and served under `/licenses/`. No third-party Go modules.
 
-## Passed local checks
+## Reaction menus and room conversations (2026-10-19)
+
+The latest change adds bridge-owned reaction menus, not Element/Tuwunel changes.
+Passed through the Docker wrapper: `gofmt -l .`, `vet ./...`, `build .`, and the
+full local `test -race ./...` suite. The final race log is
+`tests/logs/hermes-fleet-bridge-matrix-go/20261019T015944-go-test_-race_._...-1634580.log`.
+`tests/integration.py` also passed a Python AST syntax check without execution.
+Local fake-endpoint checks cover menu owner/room binding, unrelated/bot reactions,
+duplicate sync delivery, stale/expired choices, paginated model/provider choices,
+chat/global model scope with immutable submitted requests, New/Resume and busy-room
+refusal, restart of selected conversations and resolved choices, automatic exact
+approval menus, menu/reaction outbox retries with stable transaction IDs, mention
+exemption, fixed dedicated-room reply mode, and reaction Stop while a model read is
+blocked. Thread prompts are now rejected; old mappings/recovery remain supported.
+State version 3 migrates versions 1/2 without changing existing session IDs, and
+prevents older controllers from silently ignoring selected conversations on rollback.
+Back up the whole stopped data directory before upgrading; a downgrade requires a
+matching controller/state backup, not manually changing the version number.
+
+Upstream source was inspected on GitHub, not the local Hermes installation:
+[`NousResearch/hermes-agent` at `67481b6`](https://github.com/NousResearch/hermes-agent/tree/67481b6f37615e58f1434ba6a1528e4c6e9b754c).
+
+- `gateway/platforms/api_server_runs.py`: explicit `session_id` requests resume
+  persisted conversation history, resolve compression-continuation tips, and
+  expose session identity in run status. The bridge retains a returned completion
+  session ID when present, keeping its own registry key stable.
+- `gateway/slash_commands_status.py`: the native `/context` handler reports
+  window use/headroom/compression, with provider-reported versus estimated counts.
+- `gateway/platforms/api_server.py`: its session representation exposes cumulative
+  counters, not those live context fields; the HTTP route table does not expose
+  `/context` or a general command dispatcher.
+- `gateway/session_commands.py`: a separate session command dispatcher includes
+  context reads, but requires local-source authorization; that is not evidence of
+  a supported HTTP command path for these API sessions.
+
+Accordingly, `!context` reports the blocker without waking Hermes. `!usage` is the
+separate cumulative-counter read. No Hermes changes, local-state scraping or
+prompt-based command impersonation were introduced.
+
+**Not run for this change:** real-image integration, a live deployment rebuild,
+real providers, Element Web interaction, or Element X phone tapping/login. The
+integration harness has been updated for reaction choices, room-level New/Resume,
+thread rejection and model scope, but its new paths are not claimed as verified.
+Element X is the mobile acceptance target, not a tested compatibility guarantee.
+The real-image/browser results below are historical, from before this menu change.
+
+## Passed local checks before reaction menus
 
 `gofmt`, `go vet ./...` and `go test -race ./...` ran through the Docker wrapper.
 The final race run is recorded in
@@ -75,7 +121,7 @@ Fake-endpoint tests cover:
 - Escaped quote characters inside quoted multiline member `.env` values are
   respected, so managed-looking lines inside unrelated values are never rewritten.
 
-## Passed real-image checks
+## Passed real-image checks before reaction menus
 
 `tests/integration.py` uses generated scratch Compose projects and bind state,
 never existing fleet directories. Its local fake inference server is reachable
@@ -105,7 +151,7 @@ Verified against real Tuwunel, Element assets, Docker and Hermes:
 9. Authenticated idle checks stop the Compose project without deleting bind state.
 10. Removing two agents retains their rooms/history while disabling dispatch.
 
-### Operator-created rooms and spaces (2026-10-19, this build)
+### Operator-created rooms and spaces (2026-10-19, preceding build)
 
 Verified against the running local deployment on the same Tuwunel/Element pins, with
 three provisioned agents. State was written by the previous build, so this exercised

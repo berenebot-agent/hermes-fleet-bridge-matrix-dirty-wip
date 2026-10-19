@@ -21,23 +21,37 @@ stale blocking questions for the next implementer.
 - Users may create spaces and rooms and invite agents into them. Spaces are joined
   but never answered in. Invitations pending at startup are reconciled, because an
   incrementing sync reports invites only relative to its cursor.
-- Mention policy is per room, set from chat with `!require_mention on|off`: never
+- Mention policy is per agent/room, set from chat with `!require_mention on|off` or
+  the Reply mode reaction menu: never
   required in the agent's provisioned room, required by default in rooms the user
   created. Per-agent configuration was rejected as more surface for the same result.
 - The bridge grants the human administrator power level 100 in each provisioned room
   and repairs it on reconciliation. Tuwunel's `private_chat` preset leaves an invitee
   at power level 0, which blocks renaming a room and filing it into a space: Element
   rolls its space link back when the parent event is refused.
-- Per-room backfill anchors and per-room Hermes sessions; `(room_id, thread_root)`
-  identifies one conversation. The provisioned room keeps the strict fail-closed
+- Per-room backfill anchors and a selected Hermes conversation per room, with
+  non-destructive New/Resume and bridge-only inventory. The provisioned room keeps the strict fail-closed
   history rule; a user-created room may not wedge the agent's other rooms.
-- State version 2 upgrades version 1 in place (single room and session map wrapped
-  under the provisioned room) rather than requiring a data reset.
+- State version 3 upgrades versions 1/2 in place, preserving IDs and adding menu
+  delivery/action state and selected conversations. Older controllers refuse the
+  new version rather than silently routing to the old default conversation.
 - Parallel sessions are supported; FIFO within each session. Agent files/tools
   remain shared. No artificial single-run-per-agent restriction.
-- New thread sessions receive quoted root context, not full room-history forks.
-- Exact-request approve-once/deny through text commands; no permanent approvals.
-- `!context` reports verified usage counters; exact live occupancy is not claimed.
+- New thread prompts/commands are rejected with a main-room explanation. Retain
+  old thread mappings/history and recovery; the current interaction is room-only.
+- `!menu`/`!help` open single-use, owner/room/conversation-bound reaction controls
+  for Element X mobile and bundled Element Web desktop. No client/homeserver forks,
+  widgets, type-ahead, modal dialogs or additional services. Native-client login and
+  actual Element X tap behavior remain separate acceptance checks.
+- Model choice ends with This chat / Global. Global means all this agent's
+  bridge-managed conversations and its bridge-side future default, not Hermes
+  global config. Submitted request bodies never change.
+- New/Resume requires an idle room, including settled controls and delivered
+  non-menu replies. Titles use first-prompt excerpts and last-used time; no AI calls.
+- Exact-request approve-once/deny through text commands and automatic reaction
+  prompts bound to the original sender; no permanent approvals.
+- `!context` documents the native context-report HTTP API blocker; `!usage`
+  separately reports verified cumulative counters, never labelled as occupancy.
 - `!stop` affects active/queued work only in its originating conversation.
 - Ambiguous execution holds that session. `!discard` requires confirmed inactivity;
   another attempt must be an explicitly resent message, never automatic replay.

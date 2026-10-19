@@ -200,6 +200,13 @@ def main():
         def settled(event):
             return next((t for t in (state()["Turns"] or []) if t["ID"] == event and t["Phase"] == "done"), None)
 
+        def react_menu(menu_id, key):
+            target = wait_for(lambda: (state().get("Menus") or {}).get(menu_id, {}).get("EventID"))
+            content = {"m.relates_to": {"rel_type": "m.annotation", "event_id": target, "key": key}}
+            event = request("PUT", "/_matrix/client/v3/rooms/" + escaped_room + "/send/m.reaction/" + secrets.token_hex(12), content, token)["event_id"]
+            wait_for(lambda: settled(event))
+            return event
+
         first = send("cold-start-check")
         wait_for(lambda: settled(first))
         wait_for(lambda: not state()["Outbox"])
@@ -217,18 +224,32 @@ def main():
         assert state()["Room"] == room
         print("PASS bridge restart during a real Hermes run: no duplicate inference, same room", flush=True)
 
+        with lock:
+            count_before_threads = len(calls)
         thread_a = send("thread-a-check", first)
         thread_b = send("thread-b-check", slow)
         wait_for(lambda: settled(thread_a) and settled(thread_b))
-        sessions = state()["Sessions"]
-        assert sessions[first]["ID"] != sessions[slow]["ID"]
         with lock:
-            assert any("<thread-root>" in text and "thread-a-check" in text for text in calls)
-        print("PASS thread/session isolation, quoted root context, parallel-capable dispatch", flush=True)
+            assert len(calls) == count_before_threads
+        print("PASS new thread prompts explicitly rejected without inference", flush=True)
+
+        wait_for(lambda: not state()["Outbox"])
+        original_session = state()["Sessions"][room]["room"]["ID"]
+        fresh = send("!new")
+        wait_for(lambda: settled(fresh))
+        selected = state()["Rooms"][room]["Selected"]
+        assert state()["Sessions"][room][selected]["ID"] != original_session
+        wait_for(lambda: not state()["Outbox"])
+        resume = send("!resume cold-start-check")
+        wait_for(lambda: settled(resume))
+        react_menu(resume + "-menu", "1️⃣")
+        assert state()["Rooms"][room]["Selected"] == "room"
+        assert state()["Sessions"][room]["room"]["ID"] == original_session
+        print("PASS non-destructive New/Resume with a Matrix reaction choice", flush=True)
 
         approval_turn=send('approval-check')
         approval_id=wait_for(lambda:next((t['Approval'] for t in (state()['Turns'] or []) if t['ID']==approval_turn and t['Approval']),None),timeout=90)
-        deny=send('!deny '+approval_id)
+        deny=react_menu(approval_turn+'-approval-'+approval_id, '❌')
         wait_for(lambda:settled(deny) and settled(approval_turn))
         print('PASS real Hermes tool approval surfaced in Matrix and exact request denied',flush=True)
 
@@ -241,17 +262,18 @@ def main():
             assert not any('must-not-run-after-stop' in text for text in calls)
         print('PASS real run cancellation and queued-turn cancellation in the same conversation',flush=True)
 
-        for command in ["!help", "!models", "!model hermes-agent", "!context", "!status"]:
+        for command in ["!help", "!models", "!context", "!usage", "!status"]:
             event = send(command)
             wait_for(lambda: settled(event))
         wait_for(lambda: not state()["Outbox"])
         select=send('!model test-model-alternate custom')
         wait_for(lambda:settled(select))
+        react_menu(select+'-menu', '1️⃣')
         switched=send('selected-model-check')
         wait_for(lambda:settled(switched))
         with lock:
             assert any('selected-model-check' in text and model=='test-model-alternate' for text,model in model_calls)
-        print("PASS help/status/models/model/context command paths", flush=True)
+        print("PASS menu/status/model scope/context-blocker/usage command paths", flush=True)
         wait_for(lambda: not docker("ps", "-q", "--filter", "label=com.docker.compose.project=" + project).strip(), timeout=90)
         print("PASS authenticated idle checks and Compose down without deleting bind state", flush=True)
 

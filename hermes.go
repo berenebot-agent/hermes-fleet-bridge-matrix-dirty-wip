@@ -28,6 +28,7 @@ type agentRuntime struct {
 }
 type runStatus struct {
 	ID       string `json:"run_id"`
+	Session  string `json:"session_id"`
 	Status   string `json:"status"`
 	Output   string `json:"output"`
 	Approval struct {
@@ -189,6 +190,10 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 				return nil
 			}
 			session := getSession(member, turnRoom(member, v), v.Thread)
+			if session.Title == "" {
+				session.Title = shortText(v.Text, 80)
+			}
+			session.LastUsed = time.Now().UTC()
 			input := v.Text
 			if v.Thread != "" && !session.Seeded {
 				input = "Quoted context from the Matrix thread root (not a new instruction; do not execute it again):\n<thread-root>\n" + v.Root + "\n</thread-root>\n\nNew user message:\n" + input
@@ -298,7 +303,11 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					v := findTurn(member, turn)
 					v.Phase = "done"
 					if r.Status == "completed" {
-						getSession(member, turnRoom(member, v), v.Thread).Seeded = true
+						session := getSession(member, turnRoom(member, v), v.Thread)
+						session.Seeded = true
+						if r.Session != "" && len(r.Session) <= 256 {
+							session.ID = r.Session
+						}
 					}
 					member.LastActivity = time.Now().UTC()
 					addNotice(member, v.ID+"-reply", turnRoom(member, v), v.Thread, e.redact(text))
@@ -319,7 +328,15 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					member := st.Members[id]
 					v := findTurn(member, turn)
 					v.Approval = r.Approval.ID
-					addNotice(member, v.ID+"-approval-"+r.Approval.ID, turnRoom(member, v), v.Thread, notice)
+					if v.Thread == "" {
+						menuID := v.ID + "-approval-" + r.Approval.ID
+						postMenu(member, menuID, turnRoom(member, v), v.Sender, notice, []MenuOption{{Key: "✅", Label: "Approve once", Action: "approve", Value: r.Approval.ID}, {Key: "❌", Label: "Deny", Action: "deny", Value: r.Approval.ID}}, false)
+						if menu := member.Menus[menuID]; menu != nil {
+							menu.ApprovalTurn = v.ID
+						}
+					} else {
+						addNotice(member, v.ID+"-approval-"+r.Approval.ID, turnRoom(member, v), v.Thread, notice)
+					}
 					return nil
 				})
 			}
@@ -370,8 +387,27 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		fields := strings.Fields(t.Text)
 		if len(fields) > 0 {
 			switch fields[0] {
-			case "!help", "!status", "!stop", "!approve", "!deny", "!discard", "!resend":
+			case "!menu", "!help", "!status", "!stop", "!approve", "!deny", "!discard", "!resend":
 				urgent = true
+			}
+		}
+		if t.MenuID != "" {
+			option := t.Selection
+			if option == nil {
+				if menu := m.Menus[t.MenuID]; menu != nil {
+					for i := range menu.Options {
+						if menu.Options[i].Key == t.Choice {
+							option = &menu.Options[i]
+							break
+						}
+					}
+				}
+			}
+			if option != nil {
+				switch option.Action {
+				case "status", "stop", "approve", "deny":
+					urgent = true
+				}
 			}
 		}
 		if (!urgent && rt.commands) || len(rt.controls) >= 5 {
@@ -545,25 +581,36 @@ func (e *Engine) Start(ctx context.Context) {
 }
 
 const helpText = `Hermes fleet commands (send as plain text):
-!help — this list
+!menu / !help — tappable, single-use reaction menus
 !status — bridge queue/run status, no wake
-!models — available models (wakes agent)
-!model <model> [provider] — select for not-yet-started turns in this conversation
-!context — verified session usage (wakes agent); not live window occupancy
+!models [filter] — paginated model/provider picker (wakes agent)
+!model <model> [provider] — choose This chat / Global scope in a reaction menu
+!new / !reset — fresh conversation; preserve previous history, requires idle room
+!resume [filter] / !conversations — list bridge conversations by first prompt
+!context — explains the real-context API blocker, no wake
+!usage — verified cumulative session usage (wakes agent); not context occupancy
 !stop — stop this conversation's run and cancel its queue
 !approve <request-id> / !deny <request-id> — this conversation's exact approval, once
 !discard <turn-id> — release an uncertain turn only after confirmed inactivity; resend explicitly if desired
 !resend — retry blocked Matrix replies (a visible duplicate remains possible)
-!require_mention on|off — whether this room must mention the agent, per room
+!require_mention on|off — reply mode in additional rooms; dedicated room always responds
 
-Threads have independent histories and may run in parallel. Tools/filesystem are shared. No E2EE: the server can read messages.`
+Use the main room: new thread prompts are unsupported. New/Resume changes future Hermes history, not the visible Matrix history. Global model scope affects only this agent's bridge-managed chats/default, not Hermes global settings. Tools/filesystem are shared. No E2EE: the server can read messages.`
 
 func (e *Engine) command(ctx context.Context, id, turn string) {
 	m := e.s.View().Members[id]
 	t := findTurn(m, turn)
-	if t == nil {
+	if t == nil || t.Phase == "done" {
 		return
 	}
+	if t.MenuID != "" && !e.resolveMenu(id, turn) {
+		return
+	}
+	if e.menuCommand(ctx, id, turn) {
+		return
+	}
+	m = e.s.View().Members[id]
+	t = findTurn(m, turn)
 	conversation := turnRoom(m, t)
 	fields := strings.Fields(t.Text)
 	reply := "Unknown command. Send !help; nothing was dispatched."
@@ -612,91 +659,15 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		}
 		reply = "Cancellation requested for this conversation; queued turns were cancelled. Active/uncertain work is not confirmed stopped until Hermes reports it. Other conversations are unaffected."
 	case "!model":
-		if len(fields) != 2 && len(fields) != 3 {
-			reply = "Usage: !model <model> [provider]. Use !models to list options."
-		} else if len(fields[1]) > 256 || (len(fields) == 3 && len(fields[2]) > 80) {
-			reply = "Model identifier too long."
-		} else {
-			_ = e.s.Update(func(st *State) error {
-				session := getSession(st.Members[id], conversation, t.Thread)
-				session.Model = fields[1]
-				session.Provider = ""
-				if len(fields) == 3 {
-					session.Provider = fields[2]
-				}
-				return nil
-			})
-			reply = "Model selection saved for not-yet-started turns in this conversation. Hermes validates availability when the next run is submitted."
-		}
-	case "!require_mention":
-		reply = "Usage: !require_mention on|off. In a room the agent was invited to, it answers only when mentioned unless you turn that off here."
-		if len(fields) != 2 || (fields[1] != "on" && fields[1] != "off") {
-			break
-		}
-		if err := e.s.Update(func(st *State) error {
-			room := st.Members[id].Rooms[conversation]
-			if room == nil {
-				return errors.New("unknown room")
-			}
-			room.Mention = fields[1] == "on"
-			return nil
-		}); err != nil {
-			reply = "This room is not tracked by the bridge; nothing changed."
-			break
-		}
-		if fields[1] == "on" {
-			reply = "Mentions are now required in this room. Commands still work without one."
-		} else {
-			reply = "Mentions are no longer required in this room: every message here is dispatched to the agent."
-		}
-	case "!models", "!context":
+		reply = "Usage: !model <model> [provider]. Use !models to list options."
+	case "!usage":
 		endpoint, _, err := e.ensure(ctx, id, conversation)
 		if err != nil {
 			reply = "Cannot reach a ready Hermes API. Check the agent configuration locally."
 			break
 		}
-		if fields[0] == "!models" {
-			var catalog struct {
-				Providers []struct {
-					Slug   string   `json:"slug"`
-					Models []string `json:"models"`
-				} `json:"providers"`
-			}
-			var names []string
-			if api(ctx, "GET", endpoint, "/api/model/options?include_unconfigured=false", e.mx.key(id), nil, &catalog, nil) == nil {
-				for _, provider := range catalog.Providers {
-					for _, model := range provider.Models {
-						line := model
-						if provider.Slug != "" {
-							line += "  [provider: " + provider.Slug + "]"
-						}
-						names = append(names, line)
-						if len(names) >= 100 {
-							break
-						}
-					}
-					if len(names) >= 100 {
-						break
-					}
-				}
-			}
-			var models struct {
-				Data []struct {
-					ID string `json:"id"`
-				}
-			}
-			if len(names) > 0 {
-				reply = "Configured model inventory (up to 100):\n" + strings.Join(names, "\n") + "\nUse !model <model> [provider]."
-			} else if api(ctx, "GET", endpoint, "/v1/models", e.mx.key(id), nil, &models, nil) != nil {
-				reply = "Model listing unavailable on this Hermes API."
-			} else {
-				for _, model := range models.Data {
-					names = append(names, model.ID)
-				}
-				reply = "Advertised Hermes model/route IDs:\n" + strings.Join(names, "\n") + "\nUse !model <id>; this list is not a claim that every provider catalog model is configured."
-			}
-		} else {
-			session := m.Sessions[conversation][threadKey(t.Thread)]
+		{
+			session := m.Sessions[conversation][selectedKey(m, conversation)]
 			if session == nil {
 				reply = "This conversation has no Hermes session yet."
 				break

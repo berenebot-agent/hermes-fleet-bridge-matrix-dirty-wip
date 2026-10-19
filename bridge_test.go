@@ -253,8 +253,8 @@ func TestSyncAcceptsRoomMembersAndIgnoresBots(t *testing.T) {
 	if len(m.Turns) != 3 || m.Since != "next-sync" {
 		t.Fatalf("bad dispatch/dedup count %d", len(m.Turns))
 	}
-	if m.Turns[2].Root != "root text" || m.Turns[2].Thread != "$one" || m.Turns[1].Room != "!iris:chat.test" {
-		t.Fatal("room or thread context lost")
+	if m.Turns[2].Phase != "done" || m.Turns[2].Thread != "$one" || m.Turns[1].Room != "!iris:chat.test" || len(m.Outbox) != 1 {
+		t.Fatal("thread was not explicitly rejected or room context lost")
 	}
 	a := getSession(m, m.Room, "").ID
 	b := getSession(m, m.Room, "$one").ID
@@ -696,13 +696,14 @@ func TestModelCatalogAndSessionProvider(t *testing.T) {
 		}
 	})
 	s.Update(func(st *State) error {
-		st.Members["iris"].Turns = []*Turn{{ID: "models", Kind: "command", Phase: "queued", Text: "!models"}, {ID: "choose", Thread: "$a", Kind: "command", Phase: "queued", Text: "!model model-b custom:local"}}
+		st.Members["iris"].Turns = []*Turn{{ID: "models", Sender: menuOwner, Kind: "command", Phase: "queued", Text: "!models"}}
 		return nil
 	})
 	engine.command(context.Background(), "iris", "models")
-	engine.command(context.Background(), "iris", "choose")
+	menuCommandTest(t, engine, "choose", "!iris:chat.test", "!model model-b custom:local")
+	menuPickTest(t, engine, "scope", "choose-menu", "1️⃣")
 	m := s.View().Members["iris"]
-	if !strings.Contains(m.Outbox[0].Text, "model-b") || getSession(m, m.Room, "$a").Provider != "custom:local" || getSession(m, m.Room, "").Model != "" {
+	if !strings.Contains(m.Outbox[0].Text, "model-b") || getSession(m, m.Room, "").Provider != "custom:local" || getSession(m, m.Room, "$a").Model != "" {
 		t.Fatal("model catalog or session scoping broken")
 	}
 }
@@ -1184,7 +1185,7 @@ func TestStateUpgradeFromVersionOne(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(s.path)
 	s.Close()
-	if !strings.Contains(string(raw), `"Version":2`) {
+	if !strings.Contains(string(raw), `"Version":`+strconv.Itoa(stateVersion)) {
 		t.Fatal("upgraded state was not persisted")
 	}
 	again, err := openStore(c)

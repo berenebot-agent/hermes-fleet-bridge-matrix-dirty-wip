@@ -116,27 +116,29 @@ For each valid project:
 Membership is the access boundary: anyone who can post in a room the bot has joined may address the agent there, and a user who can invite the bot chooses where it serves. This is deliberate, and it means access control rests on who can invite people into the operator's rooms.
 
 - The bot joins any room or space an **approved human** invites it to, including invitations already pending at startup. Invitations from bot accounts (`agent_*`) are never accepted, so agents cannot wake each other.
-- Each room the bot serves has its own backfill anchor, mention policy and Hermes session; a `(room_id, thread_root_event_id)` pair identifies one conversation.
-- **Mention policy is per room.** The provisioned room never requires a mention; a room the operator created requires one until `!require_mention off` is run in that room. Commands are always processed without a mention.
+- Each room the bot serves has its own backfill anchor, mention policy, selected conversation and retained bridge-managed conversation inventory.
+- **Mention policy is per agent/room.** The provisioned room never requires a mention and cannot be switched to mention-only mode; a room the operator created requires one until `!require_mention off` is run in that room. Commands and valid menu reactions are always processed without a mention. The menu calls this Reply mode; changing it neither wakes Hermes nor changes conversation selection.
 - A **space** is joined but never dispatched from: it is a container, not a conversation.
-- Senders from the reserved `agent_` namespace are ignored, as are non-text events, edits and reactions. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
+- Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and other non-text events. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
 - Replies are routed back to the room and thread they came from. A room the bot is removed from stops being served; a later re-invite starts a fresh conversation.
 - At most 100 rooms are served per agent; further invitations stay pending.
 
 Additional human users may be supported later; when explicitly provisioned/approved by an operator, they should also receive usable rooms automatically. Do not expose open self-registration.
 
-## 6. Thread-to-session mapping
+## 6. Room conversations and retained thread mappings
 
-A dedicated Matrix room is the default conversation surface for each agent. Multiple Matrix **threads within the room** must be usable as independent Hermes conversations.
+A Matrix room is the conversation surface. By explicit operator choice, the mobile
+interaction follows Telegram-style New/Resume switching, not Matrix threads.
 
-- Map `(room_id, thread_root_event_id)` to a stable, persisted Hermes session ID. Sessions are keyed per room, so the same thread ID in two rooms is two conversations.
-- Include the thread root as quoted context in the new session, not as another instruction to execute. Do not inherit the complete room history or use Hermes's source-ending fork operation.
-- Plain messages to a room use a separate default room session.
-- Send each reply back into its originating Matrix room and thread.
+- Plain messages use that room's selected, persisted Hermes session. Existing room-session IDs remain unchanged on upgrade.
+- New/Reset selects a fresh session without deleting Matrix or Hermes history. Resume lists only that room's bridge-managed main-room conversations, labelled by short first-prompt excerpt and last-used UTC time; no extra title-generation calls or external-session imports.
+- Switch only when that room has no queued/running/held turns, pending controls or undelivered non-menu replies. Announce switches; never rearrange or erase the visible Matrix timeline.
+- New thread prompts/commands receive a main-room explanation and do not wake Hermes. Preserve existing thread mappings/history and safely reconcile previously admitted work; legacy replies retain their original routing. Threads are not included in the Resume picker.
+- Keep the bridge registry key stable while adopting a valid session ID returned by a completed run. Upstream `/v1/runs` resolves compression-continuation tips when resuming by ID; do not invoke source-ending forks.
 - Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). Session separation is conversation/history isolation, not isolation of shared files/tools.
 - Preserve session identities across bridge and Hermes container restarts.
 - Support typing indicators while an agent starts and runs, insofar as Matrix clients display them.
-- Treat reactions, edits and attachments as distinct features; never accidentally interpret them as instructions.
+- Menu reactions are controller controls, never agent prompt text. Edits, unrelated reactions and attachments are not instructions.
 
 ## 7. Message handling and lifecycle
 
@@ -178,18 +180,36 @@ Prioritize and test:
 
 | Command / operation | Required behavior |
 | --- | --- |
-| `!help` | Show commands that actually work |
+| `!menu`, `!help` | Fresh reaction controls; command text available under More → Command help |
 | `!status` | Queue/run/held/reply status without waking the agent |
-| `!stop` | Request cancellation of this conversation's run and cancel its queue; leave other threads running; never claim tool effects were undone |
-| `!models`, `!model <model> [provider]` | List configured model inventory (route-list fallback) and persist conversation-scoped selection for not-yet-started turns |
-| `!context` | Verified cumulative usage counters; not a claim about live context-window occupancy |
+| `!stop` | Request cancellation of this conversation's run and cancel its queue; leave other rooms running; never claim tool effects were undone |
+| `!models [filter]`, `!model <model> [provider]` | Paginated model/provider choices, configured inventory with route fallback; finish with This chat / Global scope. Global updates all bridge-managed conversations/default for this agent, not Hermes global config; submitted payloads remain immutable |
+| `!new`, `!reset`, `!resume [filter]`, `!conversations [filter]` | Non-destructive, idle-only room conversation switching and filtered inventory |
+| `!context` | Explicit native-context HTTP API blocker; no fabricated occupancy or internal-file scraping |
+| `!usage` | Verified cumulative session counters, separately labelled as not context occupancy; may wake Hermes |
 | `!approve <request-id>`, `!deny <request-id>` | This originating room/thread/session/run/exact request only; approve once or deny, never blanket grants |
-| `!require_mention on\|off` | Whether this room must mention the agent before it answers. Per room, any member may set it, persisted across restarts, commands always exempt |
+| `!require_mention on\|off` | Reply mode in additional rooms; dedicated room fixed to Always responds. Persisted per agent/room, commands/menu reactions exempt |
 | Background tasks | Only activity observable through the Hermes API contributes to idle safety; no arbitrary job-administration UI |
 
 **Mandatory feasibility gate:** Check the *actual Hermes HTTP API* for model selection, context inspection, cancellation, and approvals; do not assume Hermes native Matrix adapter features are automatically available to an API-based bridge. Unsupported commands must explain the limitation, not fake success. Model, context and stop are high-priority integration acceptance items.
 
 The MVP uses plain-text `!` commands because clients can intercept `/` commands. Those commands were delivered through Matrix in the integration checks. Status/cancellation/approvals are processed outside the blocked turn queue, and queued controls form a barrier before further dispatch in that conversation.
+
+Reaction menus target Element X mobile and bundled Element Web desktop without
+client or homeserver modifications, widgets, type-ahead or modal dialogs. The bot
+seeds numbered reaction chips; lists have five choices plus previous/next/cancel.
+Choices are single-use and bound to the opener, room, selected conversation and
+relevant settings revision. Stale choices are refused; menus/action intent and
+delivery progress live in the same atomic state file. Automatic approval menus
+remain usable when navigation changes, but are bound to the originating sender,
+turn and exact pending request, reverified over the authenticated API before
+approve-once/deny. Reaction removal does not undo actions. Retain direct controls
+as fallback; no native command dispatch by sending command text as a model prompt.
+
+Bound storage to 200 recent/pending menus per agent and 1,000 sessions per room;
+navigation menus expire after 24 hours, and closed-menu records can be evicted to
+keep the bound. Inventory reads consider at most 1,000 advertised models/routes.
+Actual Element X tap behavior is a separate acceptance check, not yet verified.
 
 ## 9. Security and access control
 
@@ -206,7 +226,7 @@ The MVP uses plain-text `!` commands because clients can intercept `/` commands.
 
 ## 10. V1 boundaries
 
-**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory plus every room or space an approved human invites the bot to; URL/login/password-only users; durable message relay; wake/idle stop; per-room thread/session isolation; typing indicator; text replies; per-room mention policy; basic health; verified commands where APIs exist.
+**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory plus every room or space an approved human invites the bot to; URL/login/password-only Web users; durable message relay; wake/idle stop; room-level conversation selection; retained legacy thread history/recovery; reaction controls; typing indicator; text replies; per-room mention policy; basic health; verified commands where APIs exist. Native mobile client login is controlled by that client, not bundled Element settings.
 
 **Out of scope:** Federation, public signup, arbitrary external Matrix servers, agent-to-agent autonomous loops, cross-host orchestration, agent cron scheduling, external-job safety, file/audio/media relay, custom chat UI, E2EE, multi-tenant SaaS, community-space management (curating spaces, room ordering and restricted-join rules on the operator's behalf), and comprehensive Matrix administration tools.
 
@@ -217,9 +237,9 @@ The MVP uses plain-text `!` commands because clients can intercept `/` commands.
 3. Three configured Compose directories create exactly three stable agent identities and visible private rooms.
 4. Posting text to a stopped agent wakes the right Compose project and produces one logical Hermes turn and one correctly routed reply.
 5. Restart the bridge between receipt and Hermes startup: the persisted event resumes without duplicate run.
-6. Two threads in the same room remain distinct persistent Hermes sessions.
+6. New/Resume preserves distinct persisted conversations in a room, refuses busy switches, and preserves legacy thread mappings while rejecting new thread prompts.
 7. Typing/activity is visible as supported; active runs prevent idle shutdown; inactive agents stop at the timeout.
-8. `/help` and `/status` operate. Model selection, context inspection and cancellation pass real API tests or have explicitly documented blockers and supported alternatives.
+8. `!menu`, `!help` and `!status` operate. Reaction choices, model chat/global scope, context/usage distinctions and cancellation pass fake-endpoint tests; real API/client checks have explicit status and blockers.
 9. Bridge restart does not duplicate accounts or rooms. Adding a directory provisions a new agent; removing it does not delete message history.
 10. Messages from bot accounts or from rooms the bot has not joined cannot wake Hermes or access private agent rooms; a member of a joined room can.
 11. An agent invited to a room answers there when mentioned, without a mention after `!require_mention off`, and never answers in a space; an invitation pending at startup is accepted on the next start.

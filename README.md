@@ -24,11 +24,15 @@ a space is joined but never answered in. Invitations from other agents' bots are
 refused, so agents cannot wake each other. See
 [the functional spec](docs/functional-spec.md) §5 for the access-model details.
 
-Ordinary room messages share a room conversation. Each Matrix thread has its own
-durable Hermes session, initially given the quoted root message, not a copy of the
-room's entire history. Sessions are keyed per room, so the same thread in two
-rooms is two conversations. Different sessions can run concurrently; turns within
-a session remain FIFO. Sessions share the agent's tools/filesystem, not a sandbox.
+Ordinary messages use the selected conversation in that room. `!new` starts fresh
+without deleting the previous conversation; `!resume` offers a paginated list of
+bridge-managed conversations, labelled by first-prompt excerpt and last-used time.
+Switching requires no queued/running/held work, pending controls or undelivered
+non-menu replies in that room. A switch is announced but does not rearrange Matrix
+history. New thread prompts/commands receive an explanation instead of being
+dispatched; existing thread history, mappings and admitted work are preserved.
+Different rooms can run concurrently; turns within a conversation remain FIFO.
+Conversations share the agent's tools/filesystem, not a sandbox.
 
 **Security:** no E2EE; the server can read messages. The supplied human account is
 a Matrix server administrator, as requested. Room membership is the access
@@ -146,27 +150,55 @@ controlled by the bundled Element configuration.
 
 Use **plain text `!` commands**, which Element does not intercept as slash commands:
 
-- `!help`, `!status` — supported commands and queue/run information, without waking.
-- `!models` — configured model inventory, with advertised route IDs as a fallback.
-- `!model <model> [provider]` — select model/provider for not-yet-started turns in
-  this conversation. Already-submitted requests are immutable. Hermes validates
-  availability when a run is admitted; saving a selection is not a provider call.
-- `!context` — verified cumulative session usage, **not** live context-window
-  occupancy. Model listing and context inspection can wake the agent.
+- `!menu`, `!help` — fresh controls with bot-seeded, tappable reaction choices.
+  Navigate to status, models, conversations, context/usage, reply mode, stop and
+  command help. No widgets, client forks, composer type-ahead or modal dialogs.
+- `!status` — queue/run information without waking.
+- `!models [filter]` — paginated configured model/provider choices, with advertised
+  route IDs as a fallback (not a guarantee that every route is configured). Can wake
+  the agent. Filter by model or provider text; use arrow reactions to change pages.
+- `!model <model> [provider]` — opens a **This chat / Global** scope menu. This chat
+  changes only the selected conversation; Global changes this agent's existing
+  bridge-managed conversations and future default, across its rooms, including
+  retained thread sessions. It does **not** change Hermes's global config or other
+  agents. Submitted requests remain immutable. Hermes validates availability when
+  a run is admitted; saving a selection is not a provider call.
+- `!new`, `!reset` — select a fresh conversation, preserving previous history.
+- `!resume [filter]`, `!conversations [filter]` — list/resume this room's bridge
+  conversations; filter by first-prompt excerpt. No CLI/Telegram session imports.
+- `!context` — explains the real-context HTTP API blocker, without waking.
+- `!usage` — verified cumulative session counters, **not** live context-window
+  occupancy; can wake the agent. Hermes's native `/context` is not a prompt to
+  forward: the bridge does not fake it or scrape internal files.
 - `!stop` — request cancellation and cancel queued turns in this conversation;
-  other threads continue. Confirmed stopping never means tool effects were undone.
+  other rooms continue. Confirmed stopping never means tool effects were undone.
 - `!approve <request-id>` / `!deny <request-id>` — answer this conversation's
-  current, exact tool approval. Approve-once only; no blanket/permanent grants.
+  current, exact tool approval. New main-room approvals also automatically offer
+  Approve once / Deny reactions to the original sender. No blanket/permanent grants.
 - `!discard <turn-id>` — acknowledge a held uncertain turn after authenticated
   inactivity is confirmed. Resend a new message explicitly if you want to retry.
 - `!resend` — explicitly retry a blocked Matrix reply outbox with its original
   transaction IDs; visible duplicates remain possible after remote cache expiry.
 - `!require_mention on|off` — whether this room must mention the agent before it
-  answers. Per room, any member can set it, and it survives restarts. Commands
-  always work without a mention, so this one is reachable while it is on.
+  answers in an additional room. The menu labels this **Reply mode**: Only when
+  mentioned / Every eligible message. The dedicated room is fixed to Always
+  responds. Policy is per agent/room, survives restarts and conversation switches,
+  and never bypasses existing sender/bot checks. Commands and valid menu reactions
+  are mention-exempt. Changing it does not wake Hermes.
+
+Reaction menus target **Element X on mobile and bundled Element Web on desktop**;
+actual Element X tapping remains an acceptance check, not a verified deployment
+claim. Native-client login screens are separate from the bundled Web login.
+Each menu belongs to its opener and originating room/conversation. Choices are
+single-use, persisted before execution, and stale choices are refused. Opening a
+new controls menu replaces old navigation menus, not a still-current approval.
+Removing a reaction does not undo an action. Duplicate delivery cannot repeat a
+completed local choice. Menus/reaction chips use the durable reply outbox and
+stable Matrix transaction IDs; `!resend` also retries blocked menu delivery.
 
 Unsupported commands never pretend to succeed or become agent instructions.
-Edits, reactions, attachments and non-text events do not wake agents.
+Unrelated reactions, edits, attachments and non-text events do not wake agents.
+An authorized menu choice can wake an agent only for a control that needs its API.
 
 ## Recovery and limits
 
@@ -177,6 +209,10 @@ an unbridgeable gap fails closed instead of silently dropping messages. That
 fail-closed rule protects the agent's own provisioned room; in a room the operator
 created, a history gap restarts that room's stream instead of wedging every other
 room. State written by an earlier version is upgraded in place on start.
+The current state version is 3; versions 1/2 retain their existing session IDs.
+Older controllers refuse version 3 rather than silently ignoring selected chats.
+Downgrade only with a matching controller/state backup; never edit the version
+number to force a rollback.
 
 Room membership is durable and self-healing: an invitation pending at startup is
 accepted on the next start, because an incrementing sync only offers an invite
@@ -196,7 +232,10 @@ to eight before `!resend`. Long successful runs continue polling. Startup and
 readiness errors are generic to avoid leaking keys or provider response bodies.
 
 Limits: 16 KiB incoming text/root; 100 queued/active turns per agent and 100 served
-rooms per agent; a 50-message per-room sync timeline; 12,000-byte
+rooms per agent; 1,000 stored sessions per room; 200 recent/pending menus per agent,
+navigation expiry after 24 hours (older closed-menu records may be evicted);
+five choices per list page and up to 1,000 catalog entries; a 50-event per-room
+sync timeline; 12,000-byte
 UTF-8-safe reply chunks; 8 MiB remote JSON responses; 64 MiB controller state;
 10,000-event backfill ceiling. Completed payload copies are removed from state;
 recent event IDs remain for deduplication. Hitting a durability/storage safety

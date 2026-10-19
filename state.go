@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-const stateVersion = 2
+const stateVersion = 3
 const maxPending = 100
 
 // maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
@@ -32,6 +33,8 @@ type Member struct {
 	Room, Since                              string
 	Rooms                                    map[string]*Room
 	Sessions                                 map[string]map[string]*Session
+	Menus                                    map[string]*Menu
+	DefaultModel, DefaultProvider            string
 	Turns                                    []*Turn
 	Outbox                                   []*Notice
 	LastActivity                             time.Time
@@ -44,13 +47,20 @@ type Room struct {
 	LastEvent string
 	Mention   bool
 	Space     bool
+	Selected  string
+	Revision  uint64
 }
 type Session struct {
 	ID, Model, Provider string
 	Seeded              bool
+	Title               string
+	LastUsed            time.Time
 }
 type Turn struct {
 	ID, Room, Thread, Text, Root, Kind, Phase, RunID string
+	Sender, MenuID, Choice                           string
+	Selection                                        *MenuOption
+	MenuRevision                                     uint64
 	Request                                          json.RawMessage
 	Submitted                                        time.Time
 	Retention                                        int
@@ -61,6 +71,9 @@ type Turn struct {
 }
 type Notice struct {
 	ID, Room, Thread, Text string
+	MenuID                 string
+	EventID                string
+	Reaction               int
 	Sent                   int
 	Attempts               int
 	Next                   time.Time
@@ -98,6 +111,12 @@ func loadState(b []byte, out *State) (bool, error) {
 	switch head.Version {
 	case stateVersion:
 		return false, json.Unmarshal(b, out)
+	case 2:
+		if err := json.Unmarshal(b, out); err != nil {
+			return false, err
+		}
+		out.Version = stateVersion
+		return true, nil
 	case 1:
 		var old stateV1
 		if json.Unmarshal(b, &old) != nil {
@@ -247,6 +266,29 @@ func openStore(c Config) (*Store, error) {
 		if m.Room != "" && m.Rooms[m.Room] == nil {
 			m.Rooms[m.Room] = &Room{}
 		}
+		if m.Rooms[m.Room] != nil {
+			m.Rooms[m.Room].Mention = false
+		}
+		for room, r := range m.Rooms {
+			if r == nil || (r.Selected != "" && (m.Sessions[room] == nil || m.Sessions[room][r.Selected] == nil || (r.Selected != "room" && !strings.HasPrefix(r.Selected, "chat:")))) {
+				f.Close()
+				return nil, errors.New("invalid room conversation state; restore a consistent backup")
+			}
+		}
+		for _, sessions := range m.Sessions {
+			for _, session := range sessions {
+				if session == nil || session.ID == "" {
+					f.Close()
+					return nil, errors.New("invalid session state; restore a consistent backup")
+				}
+			}
+		}
+		for _, menu := range m.Menus {
+			if menu == nil || len(menu.Options) > 8 || len(menu.Options) == 0 {
+				f.Close()
+				return nil, errors.New("invalid menu state; restore a consistent backup")
+			}
+		}
 		for _, t := range m.Turns {
 			if t == nil || t.ID == "" {
 				f.Close()
@@ -263,7 +305,7 @@ func openStore(c Config) (*Store, error) {
 			}
 		}
 		for _, n := range m.Outbox {
-			if n == nil || n.ID == "" || n.Sent < 0 || n.Sent >= len(chunks(n.Text)) {
+			if n == nil || n.ID == "" || n.Sent < 0 || n.Sent >= len(chunks(n.Text)) || n.Reaction < 0 || n.Reaction > 8 {
 				f.Close()
 				return nil, errors.New("invalid reply outbox; restore a consistent backup")
 			}
@@ -369,8 +411,11 @@ func getSession(m *Member, room, thread string) *Session {
 		m.Sessions[room] = map[string]*Session{}
 	}
 	k := threadKey(thread)
+	if thread == "" && m.Rooms[room] != nil && m.Rooms[room].Selected != "" {
+		k = m.Rooms[room].Selected
+	}
 	if m.Sessions[room][k] == nil {
-		m.Sessions[room][k] = &Session{ID: "matrix_" + stableID(room, k)}
+		m.Sessions[room][k] = &Session{ID: "matrix_" + stableID(room, k), Model: m.DefaultModel, Provider: m.DefaultProvider}
 	}
 	return m.Sessions[room][k]
 }
