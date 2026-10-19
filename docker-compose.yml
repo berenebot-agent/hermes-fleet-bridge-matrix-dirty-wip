@@ -1,3 +1,4 @@
+name: hermes-fleet-bridge-matrix
 services:
   matrix:
     build:
