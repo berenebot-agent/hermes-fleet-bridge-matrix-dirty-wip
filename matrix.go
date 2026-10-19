@@ -854,7 +854,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	if n.MenuID != "" && n.EventID != "" {
 		return mx.seedMenu(ctx, s, id, n, bot)
 	}
-	content := map[string]any{"msgtype": "m.text", "body": parts[n.Sent]}
+	content := map[string]any{"msgtype": "m.text", "body": parts[n.Sent], "format": "org.matrix.custom.html", "formatted_body": matrixFormat(parts[n.Sent])}
 	if n.Thread != "" {
 		content["m.relates_to"] = map[string]any{"rel_type": "m.thread", "event_id": n.Thread, "is_falling_back": true, "m.in_reply_to": map[string]string{"event_id": n.Thread}}
 	}

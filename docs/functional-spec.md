@@ -154,7 +154,7 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 4. Check the agent Compose project and call `docker compose up -d` if necessary.
 5. Wait for authenticated Hermes API readiness, subject to a startup timeout.
 6. Create the Hermes run with a stable session and idempotency key where available.
-7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. Token streaming is not part of this MVP.
+7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. A text reply is sent as `org.matrix.custom.html` formatted markdown so Element renders bold and code instead of showing literal `**`, with the plain markdown `body` retained as the fallback. Token streaming is not part of this MVP.
 8. Persist run and reply progress; acknowledge successful completion logically once.
 
 **Idle shutdown:**
