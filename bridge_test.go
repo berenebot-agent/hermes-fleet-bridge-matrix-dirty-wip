@@ -32,7 +32,7 @@ func testStore(t *testing.T) (Config, *Store) {
 	}
 	t.Cleanup(s.Close)
 	if err = s.Update(func(st *State) error {
-		st.Members["iris"] = &Member{ID: "iris", Dir: "/members/iris", Project: "iris", Service: "hermes", Enabled: true, Room: "!iris:chat.test", Since: "old-sync", LastEvent: "$old", Sessions: map[string]*Session{}, LastActivity: time.Now()}
+		st.Members["iris"] = &Member{ID: "iris", Dir: "/members/iris", Project: "iris", Service: "hermes", Enabled: true, Room: "!iris:chat.test", Since: "old-sync", Rooms: map[string]*Room{"!iris:chat.test": {LastEvent: "$old"}}, Sessions: map[string]map[string]*Session{}, LastActivity: time.Now()}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -58,6 +58,32 @@ func message(id, sender, text, thread string) map[string]any {
 }
 func syncResponse(events []any, limited bool) map[string]any {
 	return map[string]any{"next_batch": "next-sync", "rooms": map[string]any{"join": map[string]any{"!iris:chat.test": map[string]any{"timeline": map[string]any{"events": events, "limited": limited, "prev_batch": "gap-start"}}}}}
+}
+
+// syncRooms builds a sync response covering several joined rooms at once.
+func syncRooms(rooms map[string]any) map[string]any {
+	return map[string]any{"next_batch": "next-sync", "rooms": map[string]any{"join": rooms}}
+}
+
+// inviteEvent is a membership invite for the agent from the given sender.
+func inviteEvent(sender string) map[string]any {
+	return map[string]any{"type": "m.room.member", "sender": sender, "state_key": "@agent_iris:chat.test", "content": map[string]any{"membership": "invite"}}
+}
+
+// syncInvites builds a sync response with pending invites only.
+func syncInvites(rooms ...string) map[string]any {
+	invites := map[string]any{}
+	for _, room := range rooms {
+		invites[room] = map[string]any{"invite_state": map[string]any{"events": []any{inviteEvent("@admin:chat.test")}}}
+	}
+	return map[string]any{"next_batch": "next-sync", "rooms": map[string]any{"invite": invites}}
+}
+
+// addressed is a member message carrying an explicit Matrix mention of the agent.
+func addressed(id, text string) map[string]any {
+	m := message(id, "@admin:chat.test", text, "")
+	m["content"].(map[string]any)["m.mentions"] = map[string]any{"user_ids": []string{"@agent_iris:chat.test"}}
+	return m
 }
 func TestConfiguration(t *testing.T) {
 	t.Setenv("PUBLIC_URL", "https://chat.test")
@@ -204,10 +230,13 @@ func TestStateWriteFailurePoisonsWriter(t *testing.T) {
 		t.Fatal("previous committed cursor changed")
 	}
 }
-func TestSyncAuthorizationDedupAndThreads(t *testing.T) {
+
+// Membership is the access boundary: any human in a room may talk to the agent, while bot
+// accounts never wake it. Duplicate events and non-text relations stay ignored.
+func TestSyncAcceptsRoomMembersAndIgnoresBots(t *testing.T) {
 	c, s := testStore(t)
 	admin := "@admin:chat.test"
-	events := []any{message("$one", admin, "hello", ""), message("$bad", "@outsider:chat.test", "wake", ""), message("$bot", "@agent_iris:chat.test", "loop", ""), message("$thread", admin, "explain", "$one"), map[string]any{"event_id": "$edit", "sender": admin, "type": "m.room.message", "content": map[string]any{"msgtype": "m.text", "body": "* edit", "m.relates_to": map[string]string{"rel_type": "m.replace", "event_id": "$one"}}}}
+	events := []any{message("$one", admin, "hello", ""), message("$member", "@teammate:chat.test", "wake", ""), message("$bot", "@agent_iris:chat.test", "loop", ""), message("$otherbot", "@agent_other:chat.test", "loop", ""), message("$thread", admin, "explain", "$one"), map[string]any{"event_id": "$edit", "sender": admin, "type": "m.room.message", "content": map[string]any{"msgtype": "m.text", "body": "* edit", "m.relates_to": map[string]string{"rel_type": "m.replace", "event_id": "$one"}}}}
 	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/event/") {
 			replyJSON(w, message("$one", admin, "root text", ""))
@@ -221,15 +250,15 @@ func TestSyncAuthorizationDedupAndThreads(t *testing.T) {
 		}
 	}
 	m := s.View().Members["iris"]
-	if len(m.Turns) != 2 || m.Since != "next-sync" {
+	if len(m.Turns) != 3 || m.Since != "next-sync" {
 		t.Fatalf("bad dispatch/dedup count %d", len(m.Turns))
 	}
-	if m.Turns[1].Root != "root text" || m.Turns[1].Thread != "$one" {
-		t.Fatal("thread context lost")
+	if m.Turns[2].Root != "root text" || m.Turns[2].Thread != "$one" || m.Turns[1].Room != "!iris:chat.test" {
+		t.Fatal("room or thread context lost")
 	}
-	a := getSession(m, "").ID
-	b := getSession(m, "$one").ID
-	if a == b || getSession(m, "$one").ID != b {
+	a := getSession(m, m.Room, "").ID
+	b := getSession(m, m.Room, "$one").ID
+	if a == b || getSession(m, m.Room, "$one").ID != b {
 		t.Fatal("session mapping unstable")
 	}
 }
@@ -298,7 +327,10 @@ func TestReplyTransactionSurvivesLostAck(t *testing.T) {
 		}
 		replyJSON(w, map[string]string{"event_id": "$reply"})
 	})
-	s.Update(func(st *State) error { addNotice(st.Members["iris"], "stable-turn", "$root", "answer"); return nil })
+	s.Update(func(st *State) error {
+		addNotice(st.Members["iris"], "stable-turn", "!iris:chat.test", "$root", "answer")
+		return nil
+	})
 	mx.sendNext(context.Background(), s, "iris")
 	s.Update(func(st *State) error { st.Members["iris"].Outbox[0].Next = time.Time{}; return nil })
 	mx.sendNext(context.Background(), s, "iris")
@@ -670,7 +702,7 @@ func TestModelCatalogAndSessionProvider(t *testing.T) {
 	engine.command(context.Background(), "iris", "models")
 	engine.command(context.Background(), "iris", "choose")
 	m := s.View().Members["iris"]
-	if !strings.Contains(m.Outbox[0].Text, "model-b") || getSession(m, "$a").Provider != "custom:local" || getSession(m, "").Model != "" {
+	if !strings.Contains(m.Outbox[0].Text, "model-b") || getSession(m, m.Room, "$a").Provider != "custom:local" || getSession(m, m.Room, "").Model != "" {
 		t.Fatal("model catalog or session scoping broken")
 	}
 }
@@ -750,7 +782,7 @@ func TestAmbiguousRunningServiceNeverTriggersComposeUp(t *testing.T) {
 	called := filepath.Join(dir, "called")
 	os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\necho unsafe > "+called+"\n"), 0700)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	if _, _, err := engine.ensure(context.Background(), "iris"); err == nil {
+	if _, _, err := engine.ensure(context.Background(), "iris", ""); err == nil {
 		t.Fatal("ambiguous replicas accepted")
 	}
 	if _, err := os.Stat(called); err == nil {
@@ -772,6 +804,15 @@ func TestProvisionRecoversAliasBeforeLocalMapping(t *testing.T) {
 			replyJSON(w, map[string]string{"agent": "iris", "server": "chat.test"})
 		case strings.Contains(r.URL.Path, "/state/m.room.member/"):
 			replyJSON(w, map[string]string{"membership": "join"})
+		case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
+			if r.Method == "PUT" {
+				var body map[string]any
+				json.NewDecoder(r.Body).Decode(&body)
+				if users, _ := body["users"].(map[string]any); users["@admin:chat.test"] != float64(100) {
+					t.Error("administrator power level was not granted")
+				}
+			}
+			replyJSON(w, map[string]any{"users": map[string]any{}})
 		default:
 			created.Add(1)
 			w.WriteHeader(500)
@@ -795,6 +836,8 @@ func TestSavedRoomDoesNotDependOnAlias(t *testing.T) {
 			replyJSON(w, map[string]string{"agent": "iris", "server": "chat.test"})
 		case strings.Contains(r.URL.Path, "/state/m.room.member/"):
 			replyJSON(w, map[string]string{"membership": "join"})
+		case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
+			replyJSON(w, map[string]any{"users": map[string]any{}})
 		default:
 			created.Add(1)
 			w.WriteHeader(404)
@@ -805,6 +848,45 @@ func TestSavedRoomDoesNotDependOnAlias(t *testing.T) {
 	}
 	if created.Load() != 0 || s.View().Members["iris"].Room != "!iris:chat.test" {
 		t.Fatal("missing alias replaced a saved room")
+	}
+}
+
+// A room whose administrator already holds power level 100 is left alone, so reconciliation
+// does not rewrite room state on every restart.
+func TestProvisionGrantsAdminPowerLevelsOnce(t *testing.T) {
+	for _, existing := range []any{map[string]any{}, map[string]any{"@admin:chat.test": float64(100)}} {
+		c, s := testStore(t)
+		var puts atomic.Int32
+		mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/whoami"):
+				replyJSON(w, map[string]string{"user_id": "@agent_iris:chat.test"})
+			case strings.HasSuffix(r.URL.Path, "/org.hermes.fleet/"):
+				replyJSON(w, map[string]string{"agent": "iris", "server": "chat.test"})
+			case strings.Contains(r.URL.Path, "/state/m.room.member/"):
+				replyJSON(w, map[string]string{"membership": "join"})
+			case strings.Contains(r.URL.Path, "/state/m.room.power_levels/"):
+				if r.Method == "PUT" {
+					puts.Add(1)
+				}
+				replyJSON(w, map[string]any{"users": existing})
+			default:
+				replyJSON(w, map[string]any{})
+			}
+		})
+		if err := mx.provision(context.Background(), s, "iris"); err != nil {
+			t.Fatal(err)
+		}
+		want := int32(1)
+		if existing.(map[string]any)["@admin:chat.test"] == float64(100) {
+			want = 0
+		}
+		if puts.Load() != want {
+			t.Fatalf("power level writes = %d, want %d", puts.Load(), want)
+		}
+		if s.View().Members["iris"].Rooms["!iris:chat.test"] == nil {
+			t.Fatal("provisioned room not tracked")
+		}
 	}
 }
 
@@ -838,7 +920,7 @@ func TestRejectedFirstThreadTurnKeepsRootForExplicitRetry(t *testing.T) {
 		return nil
 	})
 	engine.work(context.Background(), "iris", "first")
-	if getSession(s.View().Members["iris"], "$root").Seeded {
+	if getSession(s.View().Members["iris"], "!iris:chat.test", "$root").Seeded {
 		t.Fatal("rejected request consumed thread context")
 	}
 	s.Update(func(st *State) error {
@@ -853,7 +935,7 @@ func TestRejectedFirstThreadTurnKeepsRootForExplicitRetry(t *testing.T) {
 	engine.work(context.Background(), "iris", "retry")
 	mu.Lock()
 	defer mu.Unlock()
-	if len(inputs) != 2 || !strings.Contains(inputs[1], "quoted-root-context") || !getSession(s.View().Members["iris"], "$root").Seeded {
+	if len(inputs) != 2 || !strings.Contains(inputs[1], "quoted-root-context") || !getSession(s.View().Members["iris"], "!iris:chat.test", "$root").Seeded {
 		t.Fatal("explicit retry lost initial thread context")
 	}
 }
@@ -930,5 +1012,225 @@ func TestStaleDispatchSnapshotCannotWakeCompletedTurn(t *testing.T) {
 	engine.fail("iris", "cancelled", "late startup failure", true)
 	if requests.Load() != 0 || findTurn(s.View().Members["iris"], "cancelled").Phase != "done" || len(s.View().Members["iris"].Outbox) > 0 {
 		t.Fatal("stale dispatch woke or held a completed turn")
+	}
+}
+
+// Membership is the access boundary: the bot joins rooms an approved human adds it to and
+// never follows an invite from another bot.
+func TestInvitesAcceptedFromHumansOnly(t *testing.T) {
+	c, s := testStore(t)
+	var joined []string
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/_matrix/client/v3/join/") {
+			joined = append(joined, strings.TrimPrefix(r.URL.Path, "/_matrix/client/v3/join/"))
+			replyJSON(w, map[string]string{"room_id": "joined"})
+			return
+		}
+		body := syncInvites("!team:chat.test", "!hostile:chat.test", "!botted:chat.test")
+		invites := body["rooms"].(map[string]any)["invite"].(map[string]any)
+		invites["!botted:chat.test"] = map[string]any{"invite_state": map[string]any{"events": []any{inviteEvent("@agent_other:chat.test")}}}
+		replyJSON(w, body)
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	accepted := map[string]bool{}
+	for _, room := range joined {
+		accepted[room] = true
+	}
+	if len(joined) != 2 || !accepted["!team:chat.test"] || !accepted["!hostile:chat.test"] {
+		t.Fatalf("invite acceptance wrong: %v", joined)
+	}
+}
+
+// A mention is required in rooms the operator created, never required in the agent's own room,
+// and a space is a container that is joined but never dispatched from.
+func TestMentionPolicyAndSpaceContainers(t *testing.T) {
+	c, s := testStore(t)
+	team, space := "!team:chat.test", "!space:chat.test"
+	s.Update(func(st *State) error {
+		st.Members["iris"].Rooms[team] = &Room{Mention: true}
+		st.Members["iris"].Rooms[space] = &Room{Mention: true, Space: true}
+		return nil
+	})
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		replyJSON(w, syncRooms(map[string]any{
+			"!iris:chat.test": map[string]any{"timeline": map[string]any{"events": []any{message("$own", "@admin:chat.test", "no mention needed", "")}}},
+			team:              map[string]any{"timeline": map[string]any{"events": []any{message("$plain", "@admin:chat.test", "unaddressed", ""), addressed("$mentioned", "@agent_iris:chat.test: summarise this")}}},
+			space:             map[string]any{"timeline": map[string]any{"events": []any{addressed("$inspace", "hello space")}}},
+		}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if findTurn(m, "$plain") != nil || findTurn(m, "$inspace") != nil || findTurn(m, "$bot") != nil {
+		t.Fatal("mention policy or space container ignored")
+	}
+	if got := findTurn(m, "$own"); got == nil || got.Room != "!iris:chat.test" {
+		t.Fatal("agent's own room stopped dispatching")
+	}
+	if got := findTurn(m, "$mentioned"); got == nil || got.Text != "summarise this" || got.Room != team {
+		t.Fatalf("mention not dispatched or not stripped: %+v", got)
+	}
+}
+
+func TestRequireMentionCommandTogglesPerRoom(t *testing.T) {
+	engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { replyJSON(w, map[string]any{}) })
+	room := "!team:chat.test"
+	s.Update(func(st *State) error {
+		st.Members["iris"].Rooms[room] = &Room{Mention: true}
+		st.Members["iris"].Turns = []*Turn{{ID: "toggle", Room: room, Kind: "command", Phase: "queued", Text: "!require_mention off"}}
+		return nil
+	})
+	engine.command(context.Background(), "iris", "toggle")
+	m := s.View().Members["iris"]
+	if m.Rooms[room].Mention || !strings.Contains(m.Outbox[0].Text, "no longer required") || m.Outbox[0].Room != room {
+		t.Fatal("mention requirement not cleared or reply misrouted")
+	}
+	s.Update(func(st *State) error {
+		st.Members["iris"].Turns = append(st.Members["iris"].Turns, &Turn{ID: "on", Room: room, Kind: "command", Phase: "queued", Text: "!require_mention on"})
+		return nil
+	})
+	engine.command(context.Background(), "iris", "on")
+	if !s.View().Members["iris"].Rooms[room].Mention {
+		t.Fatal("mention requirement not restored")
+	}
+	s.Update(func(st *State) error {
+		st.Members["iris"].Turns = append(st.Members["iris"].Turns, &Turn{ID: "bogus", Room: room, Kind: "command", Phase: "queued", Text: "!require_mention maybe"})
+		return nil
+	})
+	engine.command(context.Background(), "iris", "bogus")
+	if !strings.Contains(s.View().Members["iris"].Outbox[2].Text, "Usage:") {
+		t.Fatal("invalid toggle accepted")
+	}
+}
+
+// A gap in a room the operator created must not wedge every other room's sync.
+func TestForeignRoomGapDoesNotWedgeSync(t *testing.T) {
+	c, s := testStore(t)
+	room := "!team:chat.test"
+	s.Update(func(st *State) error { st.Members["iris"].Rooms[room] = &Room{LastEvent: "$gone"}; return nil })
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/messages") {
+			replyJSON(w, map[string]any{"chunk": []any{}, "end": "end"})
+			return
+		}
+		replyJSON(w, syncRooms(map[string]any{room: map[string]any{"timeline": map[string]any{"events": []any{message("$new", "@admin:chat.test", "hello", "")}, "limited": true, "prev_batch": "gap"}}}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if findTurn(m, "$new") == nil || m.Rooms[room].LastEvent != "$new" {
+		t.Fatal("foreign room history gap wedged the agent")
+	}
+}
+
+// Replies for a room the bot has left are dropped instead of blocking the outbox head.
+func TestRepliesToLeftRoomsAreDropped(t *testing.T) {
+	c, s := testStore(t)
+	var sent atomic.Int32
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		sent.Add(1)
+		replyJSON(w, map[string]string{"event_id": "$sent"})
+	})
+	s.Update(func(st *State) error {
+		m := st.Members["iris"]
+		addNotice(m, "gone", "!gone:chat.test", "", "undeliverable")
+		addNotice(m, "live", m.Room, "", "delivered")
+		return nil
+	})
+	if err := mx.sendNext(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if sent.Load() != 0 || len(m.Outbox) != 1 || m.Outbox[0].ID != "live" {
+		t.Fatalf("undeliverable reply not dropped: sent=%d outbox=%d", sent.Load(), len(m.Outbox))
+	}
+}
+
+// State version 1 is upgraded in place: the single room becomes the provisioned room's cursor
+// and its session map, without touching identities or history.
+func TestStateUpgradeFromVersionOne(t *testing.T) {
+	c := testConfig(t)
+	os.MkdirAll(filepath.Join(c.Data, "controller"), 0700)
+	v1 := map[string]any{
+		"Version": 1, "ServerName": "chat.test", "PublicURL": "https://chat.test", "Admin": "admin",
+		"Members": map[string]any{"iris": map[string]any{
+			"ID": "iris", "Dir": "/members/iris", "Project": "iris", "Service": "hermes", "Enabled": true,
+			"Room": "!iris:chat.test", "Since": "old-sync", "LastEvent": "$old", "LastActivity": time.Now(),
+			"Sessions": map[string]any{"room": map[string]any{"ID": "matrix_room_session", "Seeded": true}, "$a": map[string]any{"ID": "matrix_thread_session"}},
+			"Turns":    []any{map[string]any{"ID": "t1", "Thread": "$a", "Phase": "running", "RunID": "r1"}},
+			"Outbox":   []any{map[string]any{"ID": "t1-reply", "Thread": "$a", "Text": "answer"}},
+		}},
+	}
+	if err := os.WriteFile(filepath.Join(c.Data, "controller", "state.json"), jsonBytes(v1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := openStore(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if m.Rooms["!iris:chat.test"] == nil || m.Rooms["!iris:chat.test"].LastEvent != "$old" || m.Rooms["!iris:chat.test"].Mention {
+		t.Fatal("room cursor not migrated")
+	}
+	if m.Turns[0].Room != "!iris:chat.test" || m.Outbox[0].Room != "!iris:chat.test" || m.Since != "old-sync" {
+		t.Fatal("turn/notice room not defaulted")
+	}
+	if m.Sessions["!iris:chat.test"]["room"].ID != "matrix_room_session" || m.Sessions["!iris:chat.test"]["$a"].ID != "matrix_thread_session" {
+		t.Fatal("session map not migrated")
+	}
+	raw, _ := os.ReadFile(s.path)
+	s.Close()
+	if !strings.Contains(string(raw), `"Version":2`) {
+		t.Fatal("upgraded state was not persisted")
+	}
+	again, err := openStore(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.Close()
+	if again.View().Members["iris"].Rooms["!iris:chat.test"].LastEvent != "$old" {
+		t.Fatal("upgraded state did not reload")
+	}
+}
+
+func TestUnknownStateVersionIsRefused(t *testing.T) {
+	c := testConfig(t)
+	os.MkdirAll(filepath.Join(c.Data, "controller"), 0700)
+	if err := os.WriteFile(filepath.Join(c.Data, "controller", "state.json"), []byte(`{"Version":99,"Members":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openStore(c); err == nil {
+		t.Fatal("unknown state version accepted")
+	}
+}
+
+// Invitations are reconciled on every start, because an incrementing sync only offers an
+// invite relative to its cursor. Reconciliation must not advance the stored cursor.
+func TestStartupInviteReconciliation(t *testing.T) {
+	c, s := testStore(t)
+	var joined []string
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/_matrix/client/v3/join/") {
+			joined = append(joined, strings.TrimPrefix(r.URL.Path, "/_matrix/client/v3/join/"))
+			replyJSON(w, map[string]string{"room_id": "joined"})
+			return
+		}
+		body := syncInvites("!team:chat.test")
+		invites := body["rooms"].(map[string]any)["invite"].(map[string]any)
+		invites["!botted:chat.test"] = map[string]any{"invite_state": map[string]any{"events": []any{inviteEvent("@agent_other:chat.test")}}}
+		replyJSON(w, body)
+	})
+	if err := mx.reconcileInvites(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	if len(joined) != 1 || joined[0] != "!team:chat.test" {
+		t.Fatalf("startup reconciliation wrong: %v", joined)
+	}
+	if m := s.View().Members["iris"]; m.Since != "old-sync" {
+		t.Fatal("startup reconciliation advanced the sync cursor")
 	}
 }

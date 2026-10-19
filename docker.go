@@ -96,7 +96,7 @@ type composeService struct {
 }
 
 func (d *Docker) discover(ctx context.Context, dir string, o Override) (*Member, error) {
-	m := &Member{ID: filepath.Base(dir), Dir: dir, Enabled: true, Network: o.Network, Port: o.Port, Sessions: map[string]*Session{}, LastActivity: time.Now().UTC()}
+	m := &Member{ID: filepath.Base(dir), Dir: dir, Enabled: true, Network: o.Network, Port: o.Port, Rooms: map[string]*Room{}, Sessions: map[string]map[string]*Session{}, LastActivity: time.Now().UTC()}
 	for _, name := range []string{"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"} {
 		p := filepath.Join(dir, name)
 		if i, e := os.Stat(p); e == nil && !i.IsDir() {

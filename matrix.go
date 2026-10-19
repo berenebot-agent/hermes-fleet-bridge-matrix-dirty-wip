@@ -213,16 +213,57 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 			return e
 		}
 	}
-	return s.Update(func(st *State) error { st.Members[id].Room = r.Room; return nil })
+	if e = m.grantAdmin(ctx, r.Room, bot.Token, admin.User); e != nil {
+		return e
+	}
+	return s.Update(func(st *State) error {
+		member := st.Members[id]
+		member.Room = r.Room
+		if member.Rooms == nil {
+			member.Rooms = map[string]*Room{}
+		}
+		if member.Rooms[r.Room] == nil {
+			member.Rooms[r.Room] = &Room{}
+		}
+		return nil
+	})
+}
+
+// grantAdmin gives the configured administrator real power in the agent's room. Tuwunel's
+// private_chat default leaves the invited human at power level 0, which blocks renaming the
+// room and filing it into a space. The bot is the room creator, so it can always repair this.
+func (m *Matrix) grantAdmin(ctx context.Context, room, token, user string) error {
+	var levels map[string]any
+	if e := api(ctx, "GET", m.Base, roomPath(room)+"/state/m.room.power_levels/", token, nil, &levels, nil); e != nil {
+		return e
+	}
+	users, _ := levels["users"].(map[string]any)
+	if users == nil {
+		users = map[string]any{}
+	}
+	if level, ok := users[user].(float64); ok && level >= 100 {
+		return nil
+	}
+	users[user] = 100
+	levels["users"] = users
+	return api(ctx, "PUT", m.Base, roomPath(room)+"/state/m.room.power_levels/", token, levels, nil, nil)
 }
 
 type Event struct {
-	ID      string `json:"event_id"`
-	Sender  string `json:"sender"`
-	Type    string `json:"type"`
-	Content struct {
-		Body     string `json:"body"`
-		MsgType  string `json:"msgtype"`
+	ID       string `json:"event_id"`
+	Sender   string `json:"sender"`
+	Type     string `json:"type"`
+	StateKey string `json:"state_key"`
+	Content  struct {
+		Body    string `json:"body"`
+		MsgType string `json:"msgtype"`
+		// Membership appears on m.room.member events (invite detection).
+		Membership string `json:"membership"`
+		// CreateType is the m.room.create content type, which marks a space.
+		CreateType string `json:"type"`
+		Mentions   struct {
+			UserIDs []string `json:"user_ids"`
+		} `json:"m.mentions"`
 		Relation struct {
 			Type  string `json:"rel_type"`
 			ID    string `json:"event_id"`
@@ -238,70 +279,239 @@ type Timeline struct {
 	Prev    string  `json:"prev_batch"`
 }
 
+type syncRoomsResponse struct {
+	Next  string `json:"next_batch"`
+	Rooms struct {
+		Join   map[string]joinedRoom  `json:"join"`
+		Invite map[string]invitedRoom `json:"invite"`
+		Leave  map[string]struct{}    `json:"leave"`
+	} `json:"rooms"`
+}
+type joinedRoom struct {
+	Timeline Timeline `json:"timeline"`
+	State    struct {
+		Events []Event `json:"events"`
+	} `json:"state"`
+}
+type invitedRoom struct {
+	InviteState struct {
+		Events []Event `json:"events"`
+	} `json:"invite_state"`
+}
+
+// acceptInvites joins the bot to every room an approved human added it to, spaces included,
+// because room membership is the access boundary. An invite from another bot is never
+// accepted: agents must not wake each other. A failed join is retried while the invite stands.
+func (mx *Matrix) acceptInvites(ctx context.Context, m *Member, bot Credential, invites map[string]invitedRoom) {
+	for room, invited := range invites {
+		if _, known := m.Rooms[room]; !known && len(m.Rooms) >= maxRooms {
+			continue
+		}
+		inviter := ""
+		for _, ev := range invited.InviteState.Events {
+			if ev.Type == "m.room.member" && ev.StateKey == bot.User && ev.Content.Membership == "invite" {
+				inviter = ev.Sender
+			}
+		}
+		if inviter == "" || botSender(inviter) {
+			continue
+		}
+		_ = api(ctx, "POST", mx.Base, "/_matrix/client/v3/join/"+url.PathEscape(room), bot.Token, map[string]any{}, nil, nil)
+	}
+}
+
+// reconcileInvites reads the current invitation list once per start. An incrementing sync only
+// reports an invite relative to its cursor, so an invitation that arrived while the bridge was
+// elsewhere would otherwise never be offered again; invitations are reconciled on every start.
+func (mx *Matrix) reconcileInvites(ctx context.Context, s *Store, id string) error {
+	m := s.View().Members[id]
+	bot := mx.cred("agent_" + id)
+	if bot.Token == "" {
+		return errors.New("agent bot credentials unavailable")
+	}
+	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]int{"limit": 0}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
+	var response syncRoomsResponse
+	if e := api(ctx, "GET", mx.Base, "/_matrix/client/v3/sync?timeout=0&filter="+url.QueryEscape(filter), bot.Token, nil, &response, nil); e != nil {
+		return e
+	}
+	mx.acceptInvites(ctx, m, bot, response.Rooms.Invite)
+	return nil
+}
+
+// roomScan is one room's processed sync window, applied to the store in a single update.
+type roomScan struct {
+	mention bool
+	space   bool
+	last    string
+	turns   []*Turn
+}
+
+// localUser returns the localpart of a Matrix user ID, lowercased.
+func localUser(user string) string {
+	u := strings.TrimPrefix(user, "@")
+	if i := strings.IndexByte(u, ':'); i >= 0 {
+		u = u[:i]
+	}
+	return strings.ToLower(u)
+}
+
+// botSender reports whether a user belongs to the bridge's reserved agent namespace. Agent
+// bots never wake each other; that would loop.
+func botSender(user string) bool {
+	la := localUser(user)
+	return strings.HasPrefix(la, "agent_") || strings.HasPrefix(la, "agent.") || strings.HasPrefix(la, "agent-")
+}
+
+// mentioned reports whether a message addresses the agent: an explicit Matrix mention, or the
+// bot's own user ID or localpart appearing in the raw body, which includes the quoted text a
+// client puts in a reply. Localpeople are prefix-safe because bot localparts are long enough
+// to stay distinguishable.
+func mentioned(ev Event, bot Credential) bool {
+	for _, u := range ev.Content.Mentions.UserIDs {
+		if u == bot.User {
+			return true
+		}
+	}
+	la := localUser(bot.User)
+	return strings.Contains(ev.Content.Body, bot.User) || strings.Contains(strings.ToLower(ev.Content.Body), la)
+}
+
+// stripMention removes a leading address to the agent so Hermes receives the instruction
+// without the Matrix addressing. A message that is nothing but an address is left intact.
+func stripMention(text string, bot Credential) string {
+	la := localUser(bot.User)
+	for _, prefix := range []string{bot.User, "@" + la, la} {
+		if len(text) < len(prefix) || strings.ToLower(text[:len(prefix)]) != prefix {
+			continue
+		}
+		rest := strings.TrimLeft(text[len(prefix):], " \t:,-")
+		if strings.TrimSpace(rest) == "" {
+			return text
+		}
+		return rest
+	}
+	return text
+}
+
+// roomIsSpace reports whether a room is a space container. Sync state answers it for newly
+// joined rooms; otherwise the create event is fetched once and cached on the room.
+func (mx *Matrix) roomIsSpace(ctx context.Context, token, room string, state []Event) (bool, error) {
+	for _, ev := range state {
+		if ev.Type == "m.room.create" {
+			return ev.Content.CreateType == "m.space", nil
+		}
+	}
+	var create struct {
+		Type string `json:"type"`
+	}
+	if e := api(ctx, "GET", mx.Base, roomPath(room)+"/state/m.room.create/", token, nil, &create, nil); e != nil {
+		return false, e
+	}
+	return create.Type == "m.space", nil
+}
+
 func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	m := s.View().Members[id]
 	bot := mx.cred("agent_" + id)
-	filter := string(jsonBytes(map[string]any{"room": map[string]any{"rooms": []string{m.Room}, "timeline": map[string]int{"limit": 100}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
+	if m.Room == "" || bot.Token == "" {
+		return errors.New("agent room or bot credentials unavailable")
+	}
+	// One sync stream per agent covers its provisioned room plus every room the bot was invited
+	// to. Timeline entries are capped per room so a full fleet stays inside the response limit,
+	// and no room restriction is set because invites are only visible without one.
+	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]any{"limit": 50, "types": []string{"m.room.message"}}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
 	q := url.Values{"timeout": {"25000"}, "filter": {filter}}
 	if m.Since != "" {
 		q.Set("since", m.Since)
 	}
-	var response struct {
-		Next  string `json:"next_batch"`
-		Rooms struct {
-			Join map[string]struct {
-				Timeline Timeline `json:"timeline"`
-			} `json:"join"`
-		} `json:"rooms"`
-	}
+	var response syncRoomsResponse
 	if e := api(ctx, "GET", mx.Base, "/_matrix/client/v3/sync?"+q.Encode(), bot.Token, nil, &response, nil); e != nil {
 		return e
 	}
 	if response.Next == "" {
 		return errors.New("Matrix sync did not return a cursor")
 	}
-	timeline := response.Rooms.Join[m.Room].Timeline
-	events := timeline.Events
-	if timeline.Limited {
-		prefix, e := mx.backfill(ctx, m, bot.Token, timeline.Prev)
-		if e != nil {
-			return e
+	mx.acceptInvites(ctx, m, bot, response.Rooms.Invite)
+	scans := map[string]*roomScan{}
+	for room, joined := range response.Rooms.Join {
+		scan := &roomScan{mention: room != m.Room}
+		if known := m.Rooms[room]; known != nil {
+			scan.mention, scan.space, scan.last = known.Mention, known.Space, known.LastEvent
+		} else {
+			space, e := mx.roomIsSpace(ctx, bot.Token, room, joined.State.Events)
+			if e != nil {
+				return e
+			}
+			scan.space = space
 		}
-		events = append(prefix, events...)
-	}
-	roots := map[string]string{}
-	for _, ev := range events {
-		if ev.Sender != mx.cred(mx.c.Admin).User || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" || ev.Content.Relation.Type != "m.thread" {
+		if scan.space {
+			// A space is a container, not a conversation: join it, never dispatch from it.
+			scans[room] = scan
 			continue
 		}
-		root := ev.Content.Relation.ID
-		if root == "" || len(root) > 255 {
-			return errors.New("invalid Matrix thread relation")
+		events := joined.Timeline.Events
+		if joined.Timeline.Limited && scan.last != "" {
+			prefix, e := mx.backfill(ctx, bot.Token, room, scan.last, joined.Timeline.Prev)
+			if e != nil {
+				// The bridge's own room refuses to advance across missing history; a room the
+				// operator created must not wedge every other room's sync, so it restarts from
+				// this window instead.
+				if room == m.Room {
+					return e
+				}
+			} else {
+				events = append(prefix, events...)
+			}
 		}
-		var origin Event
-		if e := api(ctx, "GET", mx.Base, roomPath(m.Room)+"/event/"+url.PathEscape(root), bot.Token, nil, &origin, nil); e != nil {
-			return errors.New("cannot validate thread root; sync cursor retained")
+		roots, broken := map[string]string{}, map[string]bool{}
+		for _, ev := range events {
+			if botSender(ev.Sender) || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" || ev.Content.Relation.Type != "m.thread" {
+				continue
+			}
+			root := ev.Content.Relation.ID
+			if root == "" || len(root) > 255 {
+				if room == m.Room {
+					return errors.New("invalid Matrix thread relation")
+				}
+				broken[root] = true
+				continue
+			}
+			if broken[root] {
+				continue
+			}
+			if _, seen := roots[root]; seen {
+				continue
+			}
+			var origin Event
+			if e := api(ctx, "GET", mx.Base, roomPath(room)+"/event/"+url.PathEscape(root), bot.Token, nil, &origin, nil); e != nil {
+				if room == m.Room {
+					return errors.New("cannot validate thread root; sync cursor retained")
+				}
+				broken[root] = true
+				continue
+			}
+			if origin.Type != "m.room.message" || (botSender(origin.Sender) && origin.Sender != bot.User) {
+				if room == m.Room {
+					return errors.New("thread root is not an approved conversation event")
+				}
+				broken[root] = true
+				continue
+			}
+			roots[root] = origin.Content.Body
 		}
-		if origin.Type != "m.room.message" || (origin.Sender != bot.User && origin.Sender != mx.cred(mx.c.Admin).User) {
-			return errors.New("thread root is not an approved conversation event")
-		}
-		roots[root] = origin.Content.Body
-	}
-	return s.Update(func(st *State) error {
-		current := st.Members[id]
 		for _, ev := range events {
 			if ev.ID == "" {
 				continue
 			}
-			current.LastEvent = ev.ID
-			if ev.Sender != mx.cred(mx.c.Admin).User || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" || findTurn(current, ev.ID) != nil {
-				continue
-			}
-			if ev.Content.Relation.Type != "" && ev.Content.Relation.Type != "m.thread" {
+			scan.last = ev.ID
+			if botSender(ev.Sender) || ev.Type != "m.room.message" || ev.Content.MsgType != "m.text" {
 				continue
 			}
 			thread := ""
-			if ev.Content.Relation.Type == "m.thread" {
+			if ev.Content.Relation.Type != "" {
+				if ev.Content.Relation.Type != "m.thread" || broken[ev.Content.Relation.ID] {
+					continue
+				}
 				thread = ev.Content.Relation.ID
 			}
 			text := ev.Content.Body
@@ -310,28 +520,82 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 					text = text[pos+2:]
 				}
 			}
-			t := &Turn{ID: ev.ID, Thread: thread, Text: text, Root: roots[thread], Phase: "queued", Created: time.Now().UTC()}
-			if strings.HasPrefix(strings.TrimSpace(text), "!") {
+			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Text: stripMention(text, bot), Root: roots[thread], Phase: "queued", Created: time.Now().UTC()}
+			if strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
-			if !current.Enabled && t.Kind == "" {
-				t.Phase = "done"
-				addNotice(current, t.ID+"-disabled", thread, "This agent has been removed from HERMES_DIRS; dispatch is disabled.")
-			} else if len(text) > 16<<10 || len(t.Root) > 16<<10 {
-				t.Phase = "done"
-				addNotice(current, t.ID+"-size", thread, "Message or thread root exceeds the 16 KiB text limit; nothing was dispatched.")
-			} else if pending(current) >= maxPending && t.Kind == "" {
-				t.Phase = "done"
-				addNotice(current, t.ID+"-busy", thread, "Agent queue is full (100 turns); nothing was dispatched. Try again later.")
+			// In a room the operator created the bot behaves like any other member and answers
+			// when addressed; in its own room a mention is never required.
+			if t.Kind == "" && scan.mention && !mentioned(ev, bot) {
+				continue
 			}
-			current.Turns = append(current.Turns, t)
+			scan.turns = append(scan.turns, t)
+		}
+		scans[room] = scan
+	}
+	return s.Update(func(st *State) error {
+		current := st.Members[id]
+		if current.Rooms == nil {
+			current.Rooms = map[string]*Room{}
+		}
+		for room, scan := range scans {
+			tracked := current.Rooms[room]
+			if tracked == nil {
+				tracked = &Room{Mention: scan.mention, Space: scan.space}
+				current.Rooms[room] = tracked
+			}
+			tracked.Space = scan.space
+			if scan.last != "" {
+				tracked.LastEvent = scan.last
+			}
+			for _, t := range scan.turns {
+				if findTurn(current, t.ID) != nil {
+					continue
+				}
+				if !current.Enabled && t.Kind == "" {
+					if room != m.Room {
+						// A removed agent does not announce itself in operator-created rooms.
+						continue
+					}
+					t.Phase = "done"
+					addNotice(current, t.ID+"-disabled", room, t.Thread, "This agent has been removed from HERMES_DIRS; dispatch is disabled.")
+				} else if len(t.Text) > 16<<10 || len(t.Root) > 16<<10 {
+					t.Phase = "done"
+					addNotice(current, t.ID+"-size", room, t.Thread, "Message or thread root exceeds the 16 KiB text limit; nothing was dispatched.")
+				} else if pending(current) >= maxPending && t.Kind == "" {
+					t.Phase = "done"
+					addNotice(current, t.ID+"-busy", room, t.Thread, "Agent queue is full (100 turns); nothing was dispatched. Try again later.")
+				}
+				current.Turns = append(current.Turns, t)
+			}
+		}
+		// A room the bot has left stops being served; a later re-invite starts a fresh
+		// conversation rather than resuming a session nobody can see any more.
+		for room := range response.Rooms.Leave {
+			if room == m.Room {
+				continue
+			}
+			delete(current.Rooms, room)
+			delete(current.Sessions, room)
+			for _, t := range current.Turns {
+				if t.Room == room && t.Kind == "" && (t.Phase == "queued" || t.Phase == "processing") {
+					t.Phase = "done"
+				}
+			}
+			kept := current.Outbox[:0]
+			for _, n := range current.Outbox {
+				if n.Room != room {
+					kept = append(kept, n)
+				}
+			}
+			current.Outbox = kept
 		}
 		current.Since = response.Next
 		prune(current)
 		return nil
 	})
 }
-func (mx *Matrix) backfill(ctx context.Context, m *Member, token, from string) ([]Event, error) {
+func (mx *Matrix) backfill(ctx context.Context, token, room, anchor, from string) ([]Event, error) {
 	var reverse []Event
 	seen := map[string]bool{}
 	for page := 0; page < 100; page++ {
@@ -344,19 +608,19 @@ func (mx *Matrix) backfill(ctx context.Context, m *Member, token, from string) (
 			End   string  `json:"end"`
 		}
 		q := url.Values{"dir": {"b"}, "limit": {"100"}, "from": {from}}
-		if e := api(ctx, "GET", mx.Base, roomPath(m.Room)+"/messages?"+q.Encode(), token, nil, &r, nil); e != nil {
+		if e := api(ctx, "GET", mx.Base, roomPath(room)+"/messages?"+q.Encode(), token, nil, &r, nil); e != nil {
 			return nil, e
 		}
 		found := false
 		for _, ev := range r.Chunk {
-			if ev.ID == m.LastEvent && m.LastEvent != "" {
+			if ev.ID == anchor && anchor != "" {
 				found = true
 				break
 			}
 			reverse = append(reverse, ev)
 		}
 		if found || len(r.Chunk) == 0 || r.End == "" || r.End == from {
-			if !found && m.LastEvent != "" {
+			if !found && anchor != "" {
 				return nil, errors.New("Matrix history gap cannot be bridged; sync cursor retained")
 			}
 			for i, j := 0, len(reverse)-1; i < j; i, j = i+1, j-1 {
@@ -392,6 +656,21 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	if time.Now().Before(n.Next) || n.Attempts >= 8 {
 		return nil
 	}
+	room := n.Room
+	if room == "" {
+		room = m.Room
+	}
+	if m.Rooms[room] == nil {
+		// The bot is no longer in this room; drop the reply instead of blocking every later
+		// reply behind an undeliverable head.
+		return s.Update(func(st *State) error {
+			a := st.Members[id]
+			if len(a.Outbox) > 0 && a.Outbox[0].ID == n.ID {
+				a.Outbox = a.Outbox[1:]
+			}
+			return nil
+		})
+	}
 	parts := chunks(n.Text)
 	bot := mx.cred("agent_" + id)
 	content := map[string]any{"msgtype": "m.text", "body": parts[n.Sent]}
@@ -402,7 +681,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	var r struct {
 		ID string `json:"event_id"`
 	}
-	e := api(ctx, "PUT", mx.Base, roomPath(m.Room)+"/send/m.room.message/"+txn, bot.Token, content, &r, nil)
+	e := api(ctx, "PUT", mx.Base, roomPath(room)+"/send/m.room.message/"+txn, bot.Token, content, &r, nil)
 	if e == nil && r.ID == "" {
 		e = errors.New("Matrix send returned no event ID")
 	}
@@ -426,7 +705,10 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 		return nil
 	})
 }
-func (mx *Matrix) typing(ctx context.Context, m *Member, on bool) {
+func (mx *Matrix) typing(ctx context.Context, m *Member, room string, on bool) {
 	bot := mx.cred("agent_" + m.ID)
-	_ = api(ctx, "PUT", mx.Base, roomPath(m.Room)+"/typing/"+url.PathEscape(bot.User), bot.Token, map[string]any{"typing": on, "timeout": 25000}, nil, nil)
+	if room == "" {
+		room = m.Room
+	}
+	_ = api(ctx, "PUT", mx.Base, roomPath(room)+"/typing/"+url.PathEscape(bot.User), bot.Token, map[string]any{"typing": on, "timeout": 25000}, nil, nil)
 }

@@ -25,7 +25,7 @@ checksums and served under `/licenses/`. No third-party Go modules.
 
 `gofmt`, `go vet ./...` and `go test -race ./...` ran through the Docker wrapper.
 The final race run is recorded in
-`tests/logs/hermes-fleet-bridge-matrix-go/20261018T234122-go-test_-race_._...-1298900.log`.
+`tests/logs/hermes-fleet-bridge-matrix-go/20261019T012932-go-test_-race_._...-1555332.log`.
 
 Fake-endpoint tests cover:
 
@@ -36,6 +36,20 @@ Fake-endpoint tests cover:
   poisoning, and retention-window downgrade handling.
 - Approved-sender/known-room routing, bot/edit filtering, transactional queue/cursor
   receipt, redelivery deduplication, limited-sync backfill ordering and gap refusal.
+- Room-membership routing: any human member of a joined room dispatches, `agent_*`
+  bot senders and their events never do, and a thread-root from another agent is
+  refused in the agent's own room but skipped in an operator-created room.
+- Per-room mention policy: no mention needed in the provisioned room, mention needed
+  in an operator-created room, mention stripped before dispatch, commands exempt, and
+  `!require_mention on|off` persisting the setting per room.
+- Space containers are tracked and joined but never dispatched from.
+- Invitation handling: a human invitation joins, a bot invitation never joins, and
+  startup reconciliation accepts a pending invitation without moving the sync cursor.
+- Replies for a room the bot has left are dropped instead of blocking the outbox head.
+- A history gap in an operator-created room restarts that room without wedging the
+  other rooms' sync.
+- State version 1 upgrades in place to version 2 (room cursor, session map, turn and
+  notice rooms) and reloads; an unknown state version is refused.
 - Queue backpressure without blocking safety commands; stable per-thread sessions.
 - Lost Matrix acknowledgement with identical transaction IDs; Unicode chunking.
 - Frontend admin/federation blocking and refusal to show the UI before readiness.
@@ -91,6 +105,35 @@ Verified against real Tuwunel, Element assets, Docker and Hermes:
 9. Authenticated idle checks stop the Compose project without deleting bind state.
 10. Removing two agents retains their rooms/history while disabling dispatch.
 
+### Operator-created rooms and spaces (2026-10-19, this build)
+
+Verified against the running local deployment on the same Tuwunel/Element pins, with
+three provisioned agents. State was written by the previous build, so this exercised
+the version 1 to 2 upgrade on real data.
+
+1. The upgrade rewrote controller state to version 2 in place: per-room cursors,
+   session maps keyed by room, and turn/notice rooms defaulted to the provisioned
+   room. No history or session identity changed.
+2. Reconciliation granted the human administrator power level 100 in each previously
+   provisioned room (`users` now lists the administrator; the bot remains the room
+   creator). Renaming a room, setting a topic and inviting a user, all previously
+   refused with `M_FORBIDDEN`/power level 0, now succeed.
+3. Spaces nest agent rooms again. Adding an agent room to an operator-created space
+   writes `m.space.child` in the space and `m.space.parent` in the room; both returned
+   200, where the parent write previously failed and Element rolled the link back.
+4. Invitations pending from before this build were accepted on the next start
+   (startup reconciliation), and the bots appeared as joined members of the room and
+   of the space. An invitation from another bot was refused.
+5. A plain room message produced no turn; the same room with a mention produced one
+   turn whose text no longer carried the address, the agent cold-woke, ran, and
+   replied into that room. `!require_mention off` was confirmed in-room, after which a
+   plain message dispatched and answered; the setting was restored to required.
+6. Rooms the bot left, unknown rooms and spaces are not dispatched from; the space is
+   joined and tracked with `Space: true`.
+
+Residual risk unchanged: anyone who can invite the bot into a room chooses where that
+agent runs, and any member of a room it has joined can use the agent there.
+
 A separate Hermes feasibility spike also restarted **Hermes itself** after a
 completed request and recovered the same run ID/final output by replaying its
 key, without another fake inference call. This does not promise that an
@@ -140,6 +183,9 @@ the 768 MiB cap. This is a point measurement, not a load/performance guarantee.
 - Safety for cron, external chat adapters, unmanaged concurrent tools or workloads
   not observable through the Hermes API.
 - Automated credential rotation or additional human-user provisioning.
+- Space curation on the operator's behalf (ordering, sub-spaces, restricted-join
+  membership) and joining rooms created *inside* a space the bot is in: the operator
+  invites the bot to each room it should serve.
 
 Those are not grounds to bypass fail-closed behavior. Deploy only bridge-managed
 agents, preserve consistent backups, and use `README.md` for the operator setup.

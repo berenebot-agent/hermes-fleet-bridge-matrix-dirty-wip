@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
-const stateVersion = 1
+const stateVersion = 2
 const maxPending = 100
+
+// maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
+// letting an operator grow the per-agent sync response without limit.
+const maxRooms = 100
 
 type State struct {
 	Version                      int
@@ -25,32 +29,102 @@ type Member struct {
 	Port                                     int
 	Enabled                                  bool
 	SyncFailed                               bool
-	Room, Since, LastEvent                   string
-	Sessions                                 map[string]*Session
+	Room, Since                              string
+	Rooms                                    map[string]*Room
+	Sessions                                 map[string]map[string]*Session
 	Turns                                    []*Turn
 	Outbox                                   []*Notice
 	LastActivity                             time.Time
+}
+
+// Room is one Matrix room this agent serves: its provisioned room, plus any room an approved
+// user has invited the bot to. Cursors are per room because backfill anchors are per room,
+// while the sync token is a single per-member stream.
+type Room struct {
+	LastEvent string
+	Mention   bool
+	Space     bool
 }
 type Session struct {
 	ID, Model, Provider string
 	Seeded              bool
 }
 type Turn struct {
-	ID, Thread, Text, Root, Kind, Phase, RunID string
-	Request                                    json.RawMessage
-	Submitted                                  time.Time
-	Retention                                  int
-	Stop                                       bool
-	Approval                                   string
-	Attempts                                   int
-	Created                                    time.Time
+	ID, Room, Thread, Text, Root, Kind, Phase, RunID string
+	Request                                          json.RawMessage
+	Submitted                                        time.Time
+	Retention                                        int
+	Stop                                             bool
+	Approval                                         string
+	Attempts                                         int
+	Created                                          time.Time
 }
 type Notice struct {
-	ID, Thread, Text string
-	Sent             int
-	Attempts         int
-	Next             time.Time
+	ID, Room, Thread, Text string
+	Sent                   int
+	Attempts               int
+	Next                   time.Time
 }
+
+// stateV1 and memberV1 are the frozen state version 1 on-disk shapes. Never edit them: they
+// exist only so an existing controller state file can be upgraded in place.
+type stateV1 struct {
+	Version                      int
+	ServerName, PublicURL, Admin string
+	Members                      map[string]memberV1
+}
+type memberV1 struct {
+	ID, Dir, Home, Project, Service, Network string
+	Files                                    []string
+	Port                                     int
+	Enabled                                  bool
+	SyncFailed                               bool
+	Room, Since, LastEvent                   string
+	Sessions                                 map[string]*Session
+	Turns                                    []*Turn
+	Outbox                                   []*Notice
+	LastActivity                             time.Time
+}
+
+// loadState decodes a persisted state file, upgrading the version 1 layout by wrapping the
+// single room and session map under the member's provisioned room.
+func loadState(b []byte, out *State) (bool, error) {
+	var head struct {
+		Version int
+	}
+	if json.Unmarshal(b, &head) != nil {
+		return false, errors.New("state version unreadable")
+	}
+	switch head.Version {
+	case stateVersion:
+		return false, json.Unmarshal(b, out)
+	case 1:
+		var old stateV1
+		if json.Unmarshal(b, &old) != nil {
+			return false, errors.New("version 1 state unreadable")
+		}
+		st := State{Version: stateVersion, ServerName: old.ServerName, PublicURL: old.PublicURL, Admin: old.Admin, Members: map[string]*Member{}}
+		for id, m := range old.Members {
+			n := &Member{ID: m.ID, Dir: m.Dir, Home: m.Home, Project: m.Project, Service: m.Service, Network: m.Network, Files: m.Files, Port: m.Port, Enabled: m.Enabled, SyncFailed: m.SyncFailed, Room: m.Room, Since: m.Since, Turns: m.Turns, Outbox: m.Outbox, LastActivity: m.LastActivity, Rooms: map[string]*Room{}, Sessions: map[string]map[string]*Session{}}
+			if m.Room != "" {
+				n.Rooms[m.Room] = &Room{LastEvent: m.LastEvent}
+				n.Sessions[m.Room] = m.Sessions
+			}
+			for _, t := range n.Turns {
+				t.Room = m.Room
+			}
+			for _, o := range n.Outbox {
+				o.Room = m.Room
+			}
+			st.Members[id] = n
+		}
+		*out = st
+		return true, nil
+	default:
+		return false, errors.New("unknown state version")
+	}
+}
+
 type Store struct {
 	mu     sync.Mutex
 	state  State
@@ -135,6 +209,7 @@ func openStore(c Config) (*Store, error) {
 	}
 	s := &Store{path: filepath.Join(c.Data, "controller", "state.json"), lock: f, Fatal: make(chan error, 1)}
 	b, e := readPrivate(s.path)
+	migrated := false
 	if os.IsNotExist(e) {
 		entries, re := os.ReadDir(filepath.Join(c.Data, "matrix"))
 		if re != nil || len(entries) > 0 {
@@ -147,7 +222,7 @@ func openStore(c Config) (*Store, error) {
 		if len(b) > 64<<20 {
 			e = errors.New("state exceeds 64 MiB limit")
 		} else {
-			e = json.Unmarshal(b, &s.state)
+			migrated, e = loadState(b, &s.state)
 		}
 	}
 	if e != nil {
@@ -159,14 +234,26 @@ func openStore(c Config) (*Store, error) {
 		return nil, errors.New("state identity/version differs from configuration; refuse reset or rename")
 	}
 	for id, m := range s.state.Members {
-		if m == nil || m.ID != id || !localpart.MatchString(id) || m.Sessions == nil {
+		if m == nil || m.ID != id || !localpart.MatchString(id) {
 			f.Close()
 			return nil, errors.New("invalid member state; restore a consistent backup")
+		}
+		if m.Rooms == nil {
+			m.Rooms = map[string]*Room{}
+		}
+		if m.Sessions == nil {
+			m.Sessions = map[string]map[string]*Session{}
+		}
+		if m.Room != "" && m.Rooms[m.Room] == nil {
+			m.Rooms[m.Room] = &Room{}
 		}
 		for _, t := range m.Turns {
 			if t == nil || t.ID == "" {
 				f.Close()
 				return nil, errors.New("invalid turn state; restore a consistent backup")
+			}
+			if t.Room == "" {
+				t.Room = m.Room
 			}
 			switch t.Phase {
 			case "queued", "preparing", "submitting", "running", "held", "processing", "done":
@@ -180,6 +267,15 @@ func openStore(c Config) (*Store, error) {
 				f.Close()
 				return nil, errors.New("invalid reply outbox; restore a consistent backup")
 			}
+			if n.Room == "" {
+				n.Room = m.Room
+			}
+		}
+	}
+	if migrated {
+		if e = atomicFile(s.path, jsonBytes(s.state)); e != nil {
+			f.Close()
+			return nil, e
 		}
 	}
 	return s, nil
@@ -227,13 +323,13 @@ func (s *Store) Update(fn func(*State) error) error {
 	}
 	return nil
 }
-func addNotice(m *Member, id, thread, text string) {
+func addNotice(m *Member, id, room, thread, text string) {
 	for _, n := range m.Outbox {
 		if n.ID == id {
 			return
 		}
 	}
-	m.Outbox = append(m.Outbox, &Notice{ID: id, Thread: thread, Text: text})
+	m.Outbox = append(m.Outbox, &Notice{ID: id, Room: room, Thread: thread, Text: text})
 }
 func findTurn(m *Member, id string) *Turn {
 	for _, t := range m.Turns {
@@ -255,18 +351,46 @@ func pending(m *Member) int {
 	}
 	return n
 }
-func sessionKey(thread string) string {
+
+// threadKey names one conversation inside a room; an empty thread is the room's default one.
+func threadKey(thread string) string {
 	if thread == "" {
 		return "room"
 	}
 	return thread
 }
-func getSession(m *Member, thread string) *Session {
-	k := sessionKey(thread)
-	if m.Sessions[k] == nil {
-		m.Sessions[k] = &Session{ID: "matrix_" + stableID(m.Room, k)}
+
+// sessionKey identifies a conversation for the in-memory scheduler, which is scoped per agent
+// and must therefore separate rooms as well as threads.
+func sessionKey(room, thread string) string { return room + "\x00" + threadKey(thread) }
+
+func getSession(m *Member, room, thread string) *Session {
+	if m.Sessions[room] == nil {
+		m.Sessions[room] = map[string]*Session{}
 	}
-	return m.Sessions[k]
+	k := threadKey(thread)
+	if m.Sessions[room][k] == nil {
+		m.Sessions[room][k] = &Session{ID: "matrix_" + stableID(room, k)}
+	}
+	return m.Sessions[room][k]
+}
+
+// conversationLabel names a conversation for operator-facing output, keeping the provisioned
+// room's wording unchanged.
+func conversationLabel(m *Member, room, thread string) string {
+	if room == m.Room || room == "" {
+		return threadKey(thread)
+	}
+	return room + "/" + threadKey(thread)
+}
+
+// turnRoom is the room a turn belongs to. An empty room means the agent's provisioned room,
+// which keeps turns written before rooms were tracked on the same conversation.
+func turnRoom(m *Member, t *Turn) string {
+	if t.Room == "" {
+		return m.Room
+	}
+	return t.Room
 }
 func prune(m *Member) {
 	if len(m.Turns) < 10000 {

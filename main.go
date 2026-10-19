@@ -65,7 +65,7 @@ func reconcile(ctx context.Context, c Config, s *Store, mx *Matrix, d *Docker) e
 				for _, t := range m.Turns {
 					if t.Phase == "queued" && t.Kind == "" {
 						t.Phase = "done"
-						addNotice(m, t.ID+"-removed", t.Thread, "Agent removed: this queued turn was cancelled. Active runs may finish; history is retained.")
+						addNotice(m, t.ID+"-removed", t.Room, t.Thread, "Agent removed: this queued turn was cancelled. Active runs may finish; history is retained.")
 					}
 				}
 			}

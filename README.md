@@ -15,14 +15,27 @@ Give the user one HTTPS URL, a username and a password. They log in to the bundl
 Element Web and see their private agent rooms: no signup, room invitations,
 mentions, tokens, homeserver selection or required device verification.
 
+The user can also create their own spaces and rooms, invite an agent's bot into
+them, and the bot joins and answers there like any other member. In a room the
+user created the agent answers when mentioned by default; `!require_mention off`
+in that room makes it answer everything, and `!require_mention on` restores the
+mention requirement. The agent's own provisioned room never needs a mention, and
+a space is joined but never answered in. Invitations from other agents' bots are
+refused, so agents cannot wake each other. See
+[the functional spec](docs/functional-spec.md) §5 for the access-model details.
+
 Ordinary room messages share a room conversation. Each Matrix thread has its own
 durable Hermes session, initially given the quoted root message, not a copy of the
-room's entire history. Different sessions can run concurrently; turns within a
-session remain FIFO. Sessions share the agent's tools/filesystem, not a sandbox.
+room's entire history. Sessions are keyed per room, so the same thread in two
+rooms is two conversations. Different sessions can run concurrently; turns within
+a session remain FIFO. Sessions share the agent's tools/filesystem, not a sandbox.
 
 **Security:** no E2EE; the server can read messages. The supplied human account is
-a Matrix server administrator, as requested. Docker socket access is effectively
-host-root access. This is a trusted-host, trusted-user application, not public SaaS.
+a Matrix server administrator, as requested. Room membership is the access
+boundary: anyone who can post in a room the bot has joined can use that agent
+there, and anyone who can invite the bot chooses where it runs. Docker socket
+access is effectively host-root access. This is a trusted-host, trusted-user
+application, not public SaaS.
 
 ## Operator setup
 
@@ -148,6 +161,9 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   inactivity is confirmed. Resend a new message explicitly if you want to retry.
 - `!resend` — explicitly retry a blocked Matrix reply outbox with its original
   transaction IDs; visible duplicates remain possible after remote cache expiry.
+- `!require_mention on|off` — whether this room must mention the agent before it
+  answers. Per room, any member can set it, and it survives restarts. Commands
+  always work without a mention, so this one is reachable while it is on.
 
 Unsupported commands never pretend to succeed or become agent instructions.
 Edits, reactions, attachments and non-text events do not wake agents.
@@ -157,7 +173,15 @@ Edits, reactions, attachments and non-text events do not wake agents.
 The controller atomically replaces one mode-0600 JSON state file, fsyncs the file
 and directory, and permits one writer. Queue receipt and sync-cursor advancement
 commit together. Limited Matrix sync timelines are backfilled before advancing;
-an unbridgeable gap fails closed instead of silently dropping messages.
+an unbridgeable gap fails closed instead of silently dropping messages. That
+fail-closed rule protects the agent's own provisioned room; in a room the operator
+created, a history gap restarts that room's stream instead of wedging every other
+room. State written by an earlier version is upgraded in place on start.
+
+Room membership is durable and self-healing: an invitation pending at startup is
+accepted on the next start, because an incrementing sync only offers an invite
+relative to its cursor. A reply for a room the bot has left is dropped instead of
+blocking the reply outbox behind an undeliverable head.
 
 The Hermes request payload and idempotency key are persisted before submission.
 Known run IDs are polled after restart; missing acknowledgements reuse the same
@@ -171,7 +195,8 @@ Admission retries are bounded to three, visibility failures to eight, reply retr
 to eight before `!resend`. Long successful runs continue polling. Startup and
 readiness errors are generic to avoid leaking keys or provider response bodies.
 
-Limits: 16 KiB incoming text/root; 100 queued/active turns per agent; 12,000-byte
+Limits: 16 KiB incoming text/root; 100 queued/active turns per agent and 100 served
+rooms per agent; a 50-message per-room sync timeline; 12,000-byte
 UTF-8-safe reply chunks; 8 MiB remote JSON responses; 64 MiB controller state;
 10,000-event backfill ceiling. Completed payload copies are removed from state;
 recent event IDs remain for deduplication. Hitting a durability/storage safety

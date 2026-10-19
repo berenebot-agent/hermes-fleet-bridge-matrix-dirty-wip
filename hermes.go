@@ -89,7 +89,7 @@ func (e *Engine) readyAPI(ctx context.Context, m *Member) (string, int, error) {
 	}
 	return endpoint, cap.Features.Idempotency.Retention, nil
 }
-func (e *Engine) ensure(ctx context.Context, id string) (string, int, error) {
+func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, error) {
 	rt := e.agents[id]
 	rt.lifecycle.Lock()
 	defer rt.lifecycle.Unlock()
@@ -121,7 +121,7 @@ func (e *Engine) ensure(ctx context.Context, id string) (string, int, error) {
 	lastTyping := time.Time{}
 	for {
 		if time.Since(lastTyping) > 15*time.Second {
-			e.mx.typing(startCtx, m, true)
+			e.mx.typing(startCtx, m, room, true)
 			lastTyping = time.Now()
 		}
 		endpoint, retention, err = e.readyAPI(startCtx, m)
@@ -158,7 +158,7 @@ func (e *Engine) fail(id, turn, message string, held bool) {
 			t.Phase = "done"
 		}
 		m.LastActivity = time.Now().UTC()
-		addNotice(m, t.ID+"-failure", t.Thread, message+" Turn ID: "+t.ID)
+		addNotice(m, t.ID+"-failure", turnRoom(m, t), t.Thread, message+" Turn ID: "+t.ID)
 		return nil
 	})
 }
@@ -169,8 +169,8 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 	if t == nil || t.Phase == "done" || t.Phase == "held" || t.Kind != "" {
 		return
 	}
-	e.mx.typing(ctx, m, true)
-	endpoint, retention, err := e.ensure(ctx, id)
+	e.mx.typing(ctx, m, turnRoom(m, t), true)
+	endpoint, retention, err := e.ensure(ctx, id, turnRoom(m, t))
 	if ctx.Err() != nil {
 		return
 	}
@@ -188,7 +188,7 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 			if v.Stop || v.Phase == "done" {
 				return nil
 			}
-			session := getSession(member, v.Thread)
+			session := getSession(member, turnRoom(member, v), v.Thread)
 			input := v.Text
 			if v.Thread != "" && !session.Seeded {
 				input = "Quoted context from the Matrix thread root (not a new instruction; do not execute it again):\n<thread-root>\n" + v.Root + "\n</thread-root>\n\nNew user message:\n" + input
@@ -225,7 +225,7 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 		submitCtx, stopSubmit := context.WithDeadline(ctx, t.Submitted.Add(recoveryWindow))
 		defer stopSubmit()
 		for attempt := 0; attempt < 3; attempt++ {
-			err = api(submitCtx, "POST", endpoint, "/v1/runs", e.mx.key(id), json.RawMessage(t.Request), &admitted, map[string]string{"Idempotency-Key": stableID(e.c.ServerName, m.Room, t.ID)})
+			err = api(submitCtx, "POST", endpoint, "/v1/runs", e.mx.key(id), json.RawMessage(t.Request), &admitted, map[string]string{"Idempotency-Key": stableID(e.c.ServerName, turnRoom(m, t), t.ID)})
 			if err == nil && admitted.ID != "" {
 				break
 			}
@@ -298,10 +298,10 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					v := findTurn(member, turn)
 					v.Phase = "done"
 					if r.Status == "completed" {
-						getSession(member, v.Thread).Seeded = true
+						getSession(member, turnRoom(member, v), v.Thread).Seeded = true
 					}
 					member.LastActivity = time.Now().UTC()
-					addNotice(member, v.ID+"-reply", v.Thread, e.redact(text))
+					addNotice(member, v.ID+"-reply", turnRoom(member, v), v.Thread, e.redact(text))
 					return nil
 				})
 				return
@@ -319,13 +319,13 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					member := st.Members[id]
 					v := findTurn(member, turn)
 					v.Approval = r.Approval.ID
-					addNotice(member, v.ID+"-approval-"+r.Approval.ID, v.Thread, notice)
+					addNotice(member, v.ID+"-approval-"+r.Approval.ID, turnRoom(member, v), v.Thread, notice)
 					return nil
 				})
 			}
 		}
 		if time.Since(lastTyping) > 15*time.Second {
-			e.mx.typing(ctx, m, true)
+			e.mx.typing(ctx, m, turnRoom(m, t), true)
 			lastTyping = time.Now()
 		}
 		select {
@@ -397,10 +397,10 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	controls := map[string]bool{}
 	for _, t := range m.Turns {
 		if t.Kind == "command" && (t.Phase == "queued" || t.Phase == "processing") {
-			controls[sessionKey(t.Thread)] = true
+			controls[sessionKey(turnRoom(m, t), t.Thread)] = true
 		}
 		if activePhase(t.Phase) || rt.busy[t.ID] {
-			sessions[sessionKey(t.Thread)] = true
+			sessions[sessionKey(turnRoom(m, t), t.Thread)] = true
 		}
 	}
 	for _, t := range m.Turns {
@@ -410,14 +410,14 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		if len(rt.busy) >= e.c.Parallel {
 			break
 		}
-		if t.Phase == "queued" && (!m.Enabled || sessions[sessionKey(t.Thread)] || controls[sessionKey(t.Thread)]) {
+		if t.Phase == "queued" && (!m.Enabled || sessions[sessionKey(turnRoom(m, t), t.Thread)] || controls[sessionKey(turnRoom(m, t), t.Thread)]) {
 			continue
 		}
 		if t.Phase != "queued" && t.Phase != "preparing" && t.Phase != "submitting" && t.Phase != "running" {
 			continue
 		}
 		rt.busy[t.ID] = true
-		sessions[sessionKey(t.Thread)] = true
+		sessions[sessionKey(turnRoom(m, t), t.Thread)] = true
 		e.wg.Add(1)
 		go func(turn string) { defer e.wg.Done(); e.work(ctx, id, turn) }(t.ID)
 	}
@@ -477,6 +477,9 @@ func (e *Engine) Start(ctx context.Context) {
 		go func() {
 			defer e.wg.Done()
 			failures := 0
+			// Invitations are reconciled once per start: an incrementing sync only offers an
+			// invite relative to its cursor, so this is the only chance to see a pending one.
+			_ = e.mx.reconcileInvites(ctx, e.s, id)
 			for ctx.Err() == nil {
 				if err := e.mx.syncOnce(ctx, e.s, id); err != nil {
 					failures++
@@ -551,6 +554,7 @@ const helpText = `Hermes fleet commands (send as plain text):
 !approve <request-id> / !deny <request-id> — this conversation's exact approval, once
 !discard <turn-id> — release an uncertain turn only after confirmed inactivity; resend explicitly if desired
 !resend — retry blocked Matrix replies (a visible duplicate remains possible)
+!require_mention on|off — whether this room must mention the agent, per room
 
 Threads have independent histories and may run in parallel. Tools/filesystem are shared. No E2EE: the server can read messages.`
 
@@ -560,6 +564,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 	if t == nil {
 		return
 	}
+	conversation := turnRoom(m, t)
 	fields := strings.Fields(t.Text)
 	reply := "Unknown command. Send !help; nothing was dispatched."
 	if len(fields) == 0 {
@@ -576,10 +581,10 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		var lines []string
 		for _, v := range m.Turns {
 			if v.Kind == "" && v.Phase != "done" {
-				lines = append(lines, fmt.Sprintf("%s: %s (turn %s)", sessionKey(v.Thread), v.Phase, v.ID))
+				lines = append(lines, fmt.Sprintf("%s: %s (turn %s)", conversationLabel(m, turnRoom(m, v), v.Thread), v.Phase, v.ID))
 			}
 		}
-		reply = fmt.Sprintf("Agent %s; dispatch enabled: %t; pending: %d; reply outbox: %d.\n", id, m.Enabled, pending(m), len(m.Outbox)) + strings.Join(lines, "\n")
+		reply = fmt.Sprintf("Agent %s; rooms served: %d; dispatch enabled: %t; pending: %d; reply outbox: %d.\n", id, len(m.Rooms), m.Enabled, pending(m), len(m.Outbox)) + strings.Join(lines, "\n")
 		if len(reply) > 12000 {
 			reply = reply[:12000]
 		}
@@ -587,7 +592,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		_ = e.s.Update(func(st *State) error {
 			member := st.Members[id]
 			for _, v := range member.Turns {
-				if v.Kind != "" || v.Thread != t.Thread {
+				if v.Kind != "" || turnRoom(member, v) != conversation || v.Thread != t.Thread {
 					continue
 				}
 				if v.Phase == "queued" {
@@ -600,12 +605,12 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		})
 		if endpoint, err := e.docker.endpoint(ctx, m); err == nil {
 			for _, v := range m.Turns {
-				if v.Kind == "" && v.Thread == t.Thread && activePhase(v.Phase) && v.RunID != "" {
+				if v.Kind == "" && turnRoom(m, v) == conversation && v.Thread == t.Thread && activePhase(v.Phase) && v.RunID != "" {
 					_ = api(ctx, "POST", endpoint, "/v1/runs/"+url.PathEscape(v.RunID)+"/stop", e.mx.key(id), map[string]any{}, nil, nil)
 				}
 			}
 		}
-		reply = "Cancellation requested for this conversation; queued turns were cancelled. Active/uncertain work is not confirmed stopped until Hermes reports it. Other threads are unaffected."
+		reply = "Cancellation requested for this conversation; queued turns were cancelled. Active/uncertain work is not confirmed stopped until Hermes reports it. Other conversations are unaffected."
 	case "!model":
 		if len(fields) != 2 && len(fields) != 3 {
 			reply = "Usage: !model <model> [provider]. Use !models to list options."
@@ -613,7 +618,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 			reply = "Model identifier too long."
 		} else {
 			_ = e.s.Update(func(st *State) error {
-				session := getSession(st.Members[id], t.Thread)
+				session := getSession(st.Members[id], conversation, t.Thread)
 				session.Model = fields[1]
 				session.Provider = ""
 				if len(fields) == 3 {
@@ -623,8 +628,29 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 			})
 			reply = "Model selection saved for not-yet-started turns in this conversation. Hermes validates availability when the next run is submitted."
 		}
+	case "!require_mention":
+		reply = "Usage: !require_mention on|off. In a room the agent was invited to, it answers only when mentioned unless you turn that off here."
+		if len(fields) != 2 || (fields[1] != "on" && fields[1] != "off") {
+			break
+		}
+		if err := e.s.Update(func(st *State) error {
+			room := st.Members[id].Rooms[conversation]
+			if room == nil {
+				return errors.New("unknown room")
+			}
+			room.Mention = fields[1] == "on"
+			return nil
+		}); err != nil {
+			reply = "This room is not tracked by the bridge; nothing changed."
+			break
+		}
+		if fields[1] == "on" {
+			reply = "Mentions are now required in this room. Commands still work without one."
+		} else {
+			reply = "Mentions are no longer required in this room: every message here is dispatched to the agent."
+		}
 	case "!models", "!context":
-		endpoint, _, err := e.ensure(ctx, id)
+		endpoint, _, err := e.ensure(ctx, id, conversation)
 		if err != nil {
 			reply = "Cannot reach a ready Hermes API. Check the agent configuration locally."
 			break
@@ -670,7 +696,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 				reply = "Advertised Hermes model/route IDs:\n" + strings.Join(names, "\n") + "\nUse !model <id>; this list is not a claim that every provider catalog model is configured."
 			}
 		} else {
-			session := m.Sessions[sessionKey(t.Thread)]
+			session := m.Sessions[conversation][threadKey(t.Thread)]
 			if session == nil {
 				reply = "This conversation has no Hermes session yet."
 				break
@@ -698,7 +724,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		}
 		var target *Turn
 		for _, v := range m.Turns {
-			if v.Thread == t.Thread && v.RunID != "" && v.Approval == fields[1] && v.Phase == "running" && !v.Stop {
+			if turnRoom(m, v) == conversation && v.Thread == t.Thread && v.RunID != "" && v.Approval == fields[1] && v.Phase == "running" && !v.Stop {
 				target = v
 				break
 			}
@@ -733,7 +759,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 			break
 		}
 		target := findTurn(m, fields[1])
-		if target == nil || target.Phase != "held" || target.Thread != t.Thread {
+		if target == nil || target.Phase != "held" || turnRoom(m, target) != conversation || target.Thread != t.Thread {
 			reply = "No matching held turn in this conversation."
 			break
 		}
@@ -775,7 +801,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 		member := st.Members[id]
 		findTurn(member, turn).Phase = "done"
 		member.LastActivity = time.Now().UTC()
-		addNotice(member, turn+"-command", t.Thread, e.redact(reply))
+		addNotice(member, turn+"-command", turnRoom(member, t), t.Thread, e.redact(reply))
 		return nil
 	})
 }

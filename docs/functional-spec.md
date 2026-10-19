@@ -12,6 +12,8 @@ Build a **standalone, self-hosted Matrix chat platform for a fleet of existing H
 
 **Non-negotiable user experience:** The end user receives **one HTTPS URL, a username, and a password**. They sign in and immediately see their provisioned agent rooms. They must **not** need to choose/configure a homeserver, register, create rooms, accept invitations, change permissions, find bot IDs, type `@mentions`, install plugins, manage access tokens, or complete device verification.
 
+The user is not restricted to what was provisioned: they may create spaces and rooms, invite an agent's bot into them, and the bot joins and answers there like any other member. In a room the operator created, the bot answers when mentioned by default and can be told otherwise with `!require_mention off`; its own provisioned room never needs a mention. See §5.
+
 The *operator* performs one-time deployment by supplying the hostname, account credentials, agent Compose directories, and Docker access. **Everything relating to Matrix configuration, accounts, bots, rooms, permissions, and Element setup happens automatically.**
 
 Keep this project entirely separate from the existing Telegram bridge. Do not alter the Telegram bridge repository.
@@ -82,11 +84,12 @@ When `./data` is empty, the entrypoint/controller must:
 5. Keep public registration and federation disabled; restrict the homeserver to approved users.
 6. Generate Element configuration pointing at the bundled homeserver, removing homeserver selection / account-creation friction where the chosen client allows.
 7. Discover and validate configured Hermes Compose projects.
-8. Provision a Matrix bot account and private room for each agent. The bot creates a private room and invites the administrator; the controller performs the administrator's join with its authenticated client token. No manual invitation acceptance.
-9. Save stable mappings, room IDs, event offsets, credentials and queue state with safe filesystem permissions.
-10. Mark the application ready only when the user can actually log in and see the agent rooms.
+8. Provision a Matrix bot account and private room for each agent. The bot creates a private room, invites the administrator, grants the administrator room power, and the controller performs the administrator's join with its authenticated client token. No manual invitation acceptance. Power levels are repaired idempotently on reconciliation, because a `private_chat` invitee otherwise holds power level 0 and cannot rename the room or file it into a space.
+9. Accept room and space invitations the bot receives from an approved human, including invitations that were already pending at startup. Never accept an invitation from another agent's bot.
+10. Save stable mappings, room IDs, event offsets, credentials and queue state with safe filesystem permissions.
+11. Mark the application ready only when the user can actually log in and see the agent rooms.
 
-On every subsequent startup, reconcile missing accounts, rooms and invitations **idempotently**. Do not reset histories, reset passwords, duplicate rooms, rotate working credentials unnecessarily, or overwrite unrelated Hermes configuration.
+On every subsequent startup, reconcile missing accounts, rooms and invitations **idempotently**. Do not reset histories, reset passwords, duplicate rooms, rotate working credentials unnecessarily, or overwrite unrelated Hermes configuration. Pending invitations are reconciled once per start, because an incrementing sync only reports an invite relative to its stored cursor.
 
 Persist credentials before creating accounts, use deterministic room aliases and ownership state to recover a creation whose local mapping was not saved, and prefer an existing persisted room ID over alias lookup. A missing/deleted existing room fails closed; its history is never silently replaced. Missing controller state or secrets beside an existing homeserver database requires a consistent restore, not fresh bootstrap.
 
@@ -101,12 +104,24 @@ For each valid project:
 - Create/reuse a bot user, e.g. `@iris:chat.example.com`.
 - Create/reuse one **private dedicated room**, e.g. **Iris**.
 - Automatically join the administrator and that agent's bot; never require manual invitations.
+- Give the administrator power level 100 in that room so the human can administer it and add it to a space.
 - Map project directory, Compose project, bot account, room ID, API key, and persistent Hermes session IDs.
 - Configure or discover the Hermes API key by supported persistent `.env` conventions; preserve existing keys and unrelated configuration.
 - Allow discovery/reconciliation after an operator adds a new directory to the configuration.
 - Preserve messages, rooms and membership history after an operator removes an agent. Disable new dispatch, cancel queued turns, drain admitted runs, and leave final container retirement to the operator. Do not automatically run Compose down against a removed project.
-- Ignore unknown rooms, unapproved senders, bot-originated events, and messages associated with removed agents.
 - Do not require mentions in dedicated agent rooms. Prevent bot-to-bot reply loops.
+
+### Rooms and spaces the operator adds
+
+Membership is the access boundary: anyone who can post in a room the bot has joined may address the agent there, and a user who can invite the bot chooses where it serves. This is deliberate, and it means access control rests on who can invite people into the operator's rooms.
+
+- The bot joins any room or space an **approved human** invites it to, including invitations already pending at startup. Invitations from bot accounts (`agent_*`) are never accepted, so agents cannot wake each other.
+- Each room the bot serves has its own backfill anchor, mention policy and Hermes session; a `(room_id, thread_root_event_id)` pair identifies one conversation.
+- **Mention policy is per room.** The provisioned room never requires a mention; a room the operator created requires one until `!require_mention off` is run in that room. Commands are always processed without a mention.
+- A **space** is joined but never dispatched from: it is a container, not a conversation.
+- Senders from the reserved `agent_` namespace are ignored, as are non-text events, edits and reactions. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
+- Replies are routed back to the room and thread they came from. A room the bot is removed from stops being served; a later re-invite starts a fresh conversation.
+- At most 100 rooms are served per agent; further invitations stay pending.
 
 Additional human users may be supported later; when explicitly provisioned/approved by an operator, they should also receive usable rooms automatically. Do not expose open self-registration.
 
@@ -114,10 +129,10 @@ Additional human users may be supported later; when explicitly provisioned/appro
 
 A dedicated Matrix room is the default conversation surface for each agent. Multiple Matrix **threads within the room** must be usable as independent Hermes conversations.
 
-- Map `(room_id, thread_root_event_id)` to a stable, persisted Hermes session ID.
+- Map `(room_id, thread_root_event_id)` to a stable, persisted Hermes session ID. Sessions are keyed per room, so the same thread ID in two rooms is two conversations.
 - Include the thread root as quoted context in the new session, not as another instruction to execute. Do not inherit the complete room history or use Hermes's source-ending fork operation.
 - Plain messages to a room use a separate default room session.
-- Send each reply back into its originating Matrix thread or room.
+- Send each reply back into its originating Matrix room and thread.
 - Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). Session separation is conversation/history isolation, not isolation of shared files/tools.
 - Preserve session identities across bridge and Hermes container restarts.
 - Support typing indicators while an agent starts and runs, insofar as Matrix clients display them.
@@ -127,7 +142,7 @@ A dedicated Matrix room is the default conversation surface for each agent. Mult
 
 **On a new authorized Matrix message:**
 
-1. Receive an event from the always-running controller and validate sender, room, type and thread.
+1. Receive an event from the always-running controller and validate room membership, event type and thread.
 2. **Persist the event ID and queued turn before advancing durable Matrix sync state.**
 3. Deduplicate repeat Matrix deliveries and place the turn in the appropriate agent/session FIFO queue.
 4. Check the agent Compose project and call `docker compose up -d` if necessary.
@@ -168,7 +183,8 @@ Prioritize and test:
 | `!stop` | Request cancellation of this conversation's run and cancel its queue; leave other threads running; never claim tool effects were undone |
 | `!models`, `!model <model> [provider]` | List configured model inventory (route-list fallback) and persist conversation-scoped selection for not-yet-started turns |
 | `!context` | Verified cumulative usage counters; not a claim about live context-window occupancy |
-| `!approve <request-id>`, `!deny <request-id>` | This approved sender's originating room/session/run/exact request only; approve once or deny, never blanket grants |
+| `!approve <request-id>`, `!deny <request-id>` | This originating room/thread/session/run/exact request only; approve once or deny, never blanket grants |
+| `!require_mention on\|off` | Whether this room must mention the agent before it answers. Per room, any member may set it, persisted across restarts, commands always exempt |
 | Background tasks | Only activity observable through the Hermes API contributes to idle safety; no arbitrary job-administration UI |
 
 **Mandatory feasibility gate:** Check the *actual Hermes HTTP API* for model selection, context inspection, cancellation, and approvals; do not assume Hermes native Matrix adapter features are automatically available to an API-based bridge. Unsupported commands must explain the limitation, not fake success. Model, context and stop are high-priority integration acceptance items.
@@ -179,8 +195,8 @@ The MVP uses plain-text `!` commands because clients can intercept `/` commands.
 
 - Disable federation and public self-registration for v1; private Matrix homeserver only.
 - Pre-provision human accounts. Ordinary chat does not require administrator rights, but the configured initial human is deliberately a server administrator by operator choice; disclose the increased browser-session privileges.
-- Private rooms, minimum necessary Matrix power levels, and each bot scoped to its own rooms.
-- Only approved users can wake agent containers; reject unknown rooms and remote identities.
+- Private rooms, minimum necessary Matrix power levels, and each bot scoped to the rooms it was invited to.
+- Room membership is the access boundary: only members of a room the bot has joined can wake that agent, and only an approved human's invitation adds a room. Bot accounts and bot-originated events never wake an agent, so agents cannot loop or be woken by each other. Anyone who can invite the bot into a room chooses where that agent runs, so who may join the operator's rooms is part of the security boundary.
 - HTTPS via external reverse proxy; normal Matrix password authentication, rate limits and no anonymous bootstrap exposure.
 - **No E2EE in v1** to avoid device-verification and bot key management complexity. Clearly disclose that the homeserver stores messages in server-readable form.
 - Never expose admin passwords, bot tokens, secrets or agent API keys through Element configuration, room messages or logs.
@@ -190,9 +206,9 @@ The MVP uses plain-text `!` commands because clients can intercept `/` commands.
 
 ## 10. V1 boundaries
 
-**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory; URL/login/password-only users; durable message relay; wake/idle stop; thread/session isolation; typing indicator; text replies; basic health; verified commands where APIs exist.
+**In scope:** One bundled homeserver + Element + Go controller; automated account, room and membership provisioning; one agent room per configured Compose directory plus every room or space an approved human invites the bot to; URL/login/password-only users; durable message relay; wake/idle stop; per-room thread/session isolation; typing indicator; text replies; per-room mention policy; basic health; verified commands where APIs exist.
 
-**Out of scope:** Federation, public signup, arbitrary external Matrix servers, agent-to-agent autonomous loops, cross-host orchestration, agent cron scheduling, external-job safety, file/audio/media relay, custom chat UI, E2EE, multi-tenant SaaS, and comprehensive Matrix administration tools.
+**Out of scope:** Federation, public signup, arbitrary external Matrix servers, agent-to-agent autonomous loops, cross-host orchestration, agent cron scheduling, external-job safety, file/audio/media relay, custom chat UI, E2EE, multi-tenant SaaS, community-space management (curating spaces, room ordering and restricted-join rules on the operator's behalf), and comprehensive Matrix administration tools.
 
 ## 11. Acceptance tests
 
@@ -205,8 +221,9 @@ The MVP uses plain-text `!` commands because clients can intercept `/` commands.
 7. Typing/activity is visible as supported; active runs prevent idle shutdown; inactive agents stop at the timeout.
 8. `/help` and `/status` operate. Model selection, context inspection and cancellation pass real API tests or have explicitly documented blockers and supported alternatives.
 9. Bridge restart does not duplicate accounts or rooms. Adding a directory provisions a new agent; removing it does not delete message history.
-10. Messages from unauthorized Matrix users or unknown rooms cannot wake Hermes or access private agent rooms.
-11. Automated tests cover initialization failure, permission errors, cold starts, durability, deduplication and recovery.
+10. Messages from bot accounts or from rooms the bot has not joined cannot wake Hermes or access private agent rooms; a member of a joined room can.
+11. An agent invited to a room answers there when mentioned, without a mention after `!require_mention off`, and never answers in a space; an invitation pending at startup is accepted on the next start.
+12. Automated tests cover initialization failure, permission errors, cold starts, durability, deduplication, recovery and the state upgrade.
 
 ## 12. Technical feasibility spikes before implementation
 
@@ -235,9 +252,9 @@ deployment check.
 
 ## 14. MVP implementation limits
 
-- One approved human login; additional human provisioning is not implemented.
+- One approved human login; additional human provisioning is not implemented, though any member of a room the bot has joined can use the agent there.
 - Go 1.27.2; standard library only; all local Go tooling runs through the Docker wrapper.
-- Text/root limit 16 KiB; at most 100 pending turns per agent; UTF-8-safe 12,000-byte reply chunks; 8 MiB remote JSON response bound; 64 MiB controller-state bound; 10,000-event backfill ceiling. Safety-limit failures do not silently acknowledge lost work.
+- Text/root limit 16 KiB; at most 100 pending turns per agent and 100 served rooms per agent; a 50-message per-room sync timeline; UTF-8-safe 12,000-byte reply chunks; 8 MiB remote JSON response bound; 64 MiB controller-state bound; 10,000-event backfill ceiling. Safety-limit failures do not silently acknowledge lost work.
 - Three admission attempts; eight visibility failures before holding; eight failed reply sends before explicit retry. Successful long-running jobs continue polling.
 - Complete authenticated activity counters, including approval waits/process completions/delegations, are required. Unobservable activity never authorizes shutdown.
 - No production proxy changes, provider calls, live fleet mutations, host package installs or Telegram bridge changes are part of the isolated MVP verification.
