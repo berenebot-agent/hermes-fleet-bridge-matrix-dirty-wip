@@ -1135,6 +1135,52 @@ func TestSharedRoomCommandsRequireAddressing(t *testing.T) {
 // A message addressed to another agent of the fleet belongs to that agent: this bot stays silent
 // instead of answering it or handing another agent's addressing to Hermes, while its own
 // addressing and ordinary prose that merely names another agent still work.
+// Element displays an agent's short name, not its internal agent_ Matrix localpart.
+// Display-name commands must route only to their selected agent in shared rooms.
+func TestSharedRoomDisplayNameAddressing(t *testing.T) {
+	c, s := testStore(t)
+	team := "!team:chat.test"
+	s.Update(func(st *State) error {
+		st.Members["iris"].Rooms[team] = &Room{Mention: true}
+		st.Members["zed"] = &Member{ID: "zed", Enabled: true, Room: "!zed:chat.test", Rooms: map[string]*Room{team: {}}, Sessions: map[string]map[string]*Session{}}
+		return nil
+	})
+	mention := func(id, text, target string) map[string]any {
+		ev := message(id, "@admin:chat.test", text, "")
+		ev["content"].(map[string]any)["m.mentions"] = map[string]any{"user_ids": []string{target}}
+		return ev
+	}
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		replyJSON(w, syncRooms(map[string]any{
+			team: map[string]any{"timeline": map[string]any{"events": []any{
+				mention("$display", "Iris !menu", "@agent_iris:chat.test"),
+				mention("$display-colon", "Iris: !status", "@agent_iris:chat.test"),
+				message("$at-display", "@admin:chat.test", "@Iris !help", ""),
+				message("$colon", "@admin:chat.test", "iris: !models", ""),
+				mention("$other", "Zed: !menu", "@agent_zed:chat.test"),
+				message("$prose", "@admin:chat.test", "Iris is a useful name", ""),
+				message("$prefix", "@admin:chat.test", "iris2: !stop", ""),
+			}}},
+		}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	for id, command := range map[string]string{
+		"$display": "!menu", "$display-colon": "!status", "$at-display": "!help", "$colon": "!models",
+	} {
+		if got := findTurn(m, id); got == nil || got.Text != command || got.Kind != "command" {
+			t.Fatalf("display-name address was not routed to Iris: id=%s turn=%+v", id, got)
+		}
+	}
+	for _, id := range []string{"$other", "$prose", "$prefix"} {
+		if got := findTurn(m, id); got != nil {
+			t.Fatalf("message for another agent or plain prose triggered Iris: %+v", got)
+		}
+	}
+}
+
 func TestMessagesAddressedToAnotherAgentAreIgnored(t *testing.T) {
 	c, s := testStore(t)
 	team := "!team:chat.test"

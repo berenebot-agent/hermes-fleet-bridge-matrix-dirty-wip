@@ -414,43 +414,105 @@ func otherBots(st State, id, room string) bool {
 // bot's own user ID or localpart appearing in the raw body, which includes the quoted text a
 // client puts in a reply. Localpeople are prefix-safe because bot localparts are long enough
 // to stay distinguishable.
-func mentioned(ev Event, bot Credential) bool {
+// explicitlyMentioned checks Matrix's structured mention metadata, which modern
+// Element clients use even when their plain-text body shows only a display name.
+func explicitlyMentioned(ev Event, user string) bool {
 	for _, u := range ev.Content.Mentions.UserIDs {
-		if u == bot.User {
+		if u == user {
 			return true
 		}
+	}
+	return false
+}
+
+// leadingAddress recognises a bot's Matrix ID, internal localpart or displayed
+// agent name at the beginning of a message. Bare display names require either an
+// actual Matrix mention or a colon/comma address ("Iris: !menu"), so ordinary
+// prose beginning with "Iris" is not accidentally turned into a command.
+func leadingAddress(text, user string, explicit bool) (string, bool) {
+	local := localUser(user)
+	display := strings.TrimPrefix(local, "agent_")
+	prefixes := []struct {
+		value       string
+		bareDisplay bool
+	}{
+		{user, false},
+		{"@" + local, false},
+		{local, false},
+		{"@" + display, false},
+		{display, true},
+	}
+	leading := strings.TrimLeft(text, " \t")
+	for _, prefix := range prefixes {
+		if len(leading) < len(prefix.value) || !strings.EqualFold(leading[:len(prefix.value)], prefix.value) {
+			continue
+		}
+		tail := leading[len(prefix.value):]
+		if tail == "" {
+			return text, true
+		}
+		separator := tail[0]
+		if separator != ' ' && separator != '\t' && separator != ':' && separator != ',' {
+			continue
+		}
+		if prefix.bareDisplay && !explicit && separator != ':' && separator != ',' {
+			continue
+		}
+		// A colon inside an ID or hostname is not an address separator:
+		// "agent_iris:chat.test is slow" must remain ordinary prose.
+		if (separator == ':' || separator == ',') && len(tail) > 1 &&
+			tail[1] != ' ' && tail[1] != '\t' && tail[1] != '!' {
+			continue
+		}
+		rest := strings.TrimLeft(tail, " \t:,")
+		if rest == "" {
+			return text, true
+		}
+		return rest, true
+	}
+	return text, false
+}
+
+// mentioned honours both Matrix mention metadata and the operator-facing agent
+// name. The legacy internal-ID substring fallback remains for existing clients.
+func mentioned(ev Event, bot Credential) bool {
+	if explicitlyMentioned(ev, bot.User) {
+		return true
+	}
+	if _, ok := leadingAddress(ev.Content.Body, bot.User, false); ok {
+		return true
 	}
 	la := localUser(bot.User)
 	return strings.Contains(ev.Content.Body, bot.User) || strings.Contains(strings.ToLower(ev.Content.Body), la)
 }
 
-// stripMention removes a leading address to the agent so Hermes receives the instruction
-// without the Matrix addressing. A message that is nothing but an address is left intact.
-func stripMention(text string, bot Credential) string {
-	la := localUser(bot.User)
-	for _, prefix := range []string{bot.User, "@" + la, la} {
-		if len(text) < len(prefix) || strings.ToLower(text[:len(prefix)]) != prefix {
-			continue
-		}
-		rest := strings.TrimLeft(text[len(prefix):], " \t:,-")
-		if strings.TrimSpace(rest) == "" {
-			return text
-		}
+// stripMention strips supported leading addresses before command detection and
+// before passing a normal prompt to Hermes. Element may render a mention using
+// the display name alone while recording the bot's ID in m.mentions.
+func stripMention(text string, bot Credential, ev Event) string {
+	if rest, ok := leadingAddress(text, bot.User, explicitlyMentioned(ev, bot.User)); ok {
 		return rest
 	}
 	return text
 }
 
-// addressedElsewhere reports whether a message addresses another agent of the fleet: an exact
-// bot handle opening the body, or an explicit mention of another agent bot without one of this
-// bot. That message belongs to the other agent, so this bot answers nothing and never hands
-// another agent's addressing to Hermes as a prompt. Only the opening token counts, so ordinary
-// prose that merely names another agent through a full user ID is untouched.
-func addressedElsewhere(ev Event, bot Credential) bool {
+// addressedElsewhere prevents one agent responding to a message visibly
+// addressed to another fleet member. Display-name routing uses known agent IDs;
+// internal bot ID addressing is still recognised for other bot namespaces.
+func addressedElsewhere(ev Event, bot Credential, st State) bool {
+	if parts := strings.SplitN(bot.User, ":", 2); len(parts) == 2 {
+		for id := range st.Members {
+			other := "@agent_" + id + ":" + parts[1]
+			if other == bot.User {
+				continue
+			}
+			if _, ok := leadingAddress(ev.Content.Body, other, explicitlyMentioned(ev, other)); ok {
+				return true
+			}
+		}
+	}
 	own := localUser(bot.User)
 	if fields := strings.Fields(ev.Content.Body); len(fields) > 0 {
-		// Element writes a member mention as "@agent_x:server", a bare localpart, or the display
-		// name (the localpart here) with its own trailing colon.
 		word := strings.TrimRight(fields[0], ":,-")
 		if strings.HasPrefix(word, "@") {
 			if la := localUser(word); la != own && botSender(la) {
@@ -618,7 +680,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 					text = text[pos+2:]
 				}
 			}
-			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot), Phase: "queued", Created: time.Now().UTC()}
+			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot, ev), Phase: "queued", Created: time.Now().UTC()}
 			if mediaMessage(ev.Content.MsgType) {
 				t.Media = incomingMedia(ev)
 				// With filename present, body is a caption; otherwise it is the display filename.
@@ -628,7 +690,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			}
 			// A message addressed to another agent of the fleet is that agent's: stay silent
 			// instead of answering it or handing another agent's addressing to Hermes.
-			if addressedElsewhere(ev, bot) {
+			if addressedElsewhere(ev, bot, view) {
 				continue
 			}
 			if t.Media == nil && strings.HasPrefix(strings.TrimSpace(t.Text), "!") {

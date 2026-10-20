@@ -297,6 +297,71 @@ func TestMediaOutputSnapshotRetryAndCleanup(t *testing.T) {
 	}
 }
 
+func TestMediaDeliverySkipsBlockedRoomHead(t *testing.T) {
+	c, s, e := mediaFixture(t)
+	m := s.View().Members["iris"]
+	turn := &Turn{ID: "$other-file", Room: "!other:chat.test", Phase: "done", Completed: time.Now()}
+	dir := filepath.Join(m.Home, "matrix-media", "outgoing", stableID(turn.ID))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.txt"), []byte("result"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, files, err := e.outputMedia(m, turn, "MATRIX_FILE: report.txt")
+	if err != nil || len(files) != 1 {
+		t.Fatalf("failed to create outgoing media: %v", err)
+	}
+	var uploads, sends atomic.Int32
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/upload") {
+			uploads.Add(1)
+			replyJSON(w, map[string]string{"content_uri": "mxc://chat.test/other-file"})
+			return
+		}
+		sends.Add(1)
+		if !strings.Contains(r.URL.Path, "!other:chat.test") {
+			t.Errorf("delivery went to the wrong room: %s", r.URL.Path)
+		}
+		if sends.Load() == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		replyJSON(w, map[string]string{"event_id": "$sent"})
+	})
+	s.Update(func(st *State) error {
+		member := st.Members["iris"]
+		member.Rooms[turn.Room] = &Room{}
+		member.Turns = append(member.Turns, turn)
+		member.Outbox = []*Notice{
+			{ID: "blocked", Room: member.Room, Text: "stuck", Attempts: 8},
+			{ID: "media", Room: turn.Room, TurnID: turn.ID, Media: files[0]},
+		}
+		return nil
+	})
+	if err := mx.sendNext(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	got := s.View().Members["iris"].Outbox
+	if len(got) != 2 || got[0].ID != "blocked" || got[1].ID != "media" ||
+		got[1].Media.Uploaded != "mxc://chat.test/other-file" || got[1].Attempts != 1 {
+		t.Fatalf("non-head upload progress was not saved: %+v", got)
+	}
+	if err := s.Update(func(st *State) error {
+		st.Members["iris"].Outbox[1].Next = time.Time{}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mx.sendNext(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	got = s.View().Members["iris"].Outbox
+	if uploads.Load() != 1 || sends.Load() != 2 || len(got) != 1 || got[0].ID != "blocked" {
+		t.Fatalf("non-head file was redelivered or blocked: uploads=%d sends=%d remaining=%+v", uploads.Load(), sends.Load(), got)
+	}
+}
+
 func TestOutputReferenceConfinement(t *testing.T) {
 	_, s, e := mediaFixture(t)
 	m := s.View().Members["iris"]

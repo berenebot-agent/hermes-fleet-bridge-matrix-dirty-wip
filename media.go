@@ -548,8 +548,8 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 			}
 			if err = s.Update(func(st *State) error {
 				v := st.Members[id].Outbox
-				if len(v) > 0 && v[0].ID == n.ID {
-					v[0].Media.Uploaded = result.URI
+				if i := noticeIndex(st.Members[id], n.ID); i >= 0 {
+					st.Members[id].Outbox[i].Media.Uploaded = result.URI
 				}
 				return nil
 			}); err != nil {
@@ -572,14 +572,15 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 	}()
 	return s.Update(func(st *State) error {
 		m := st.Members[id]
-		if len(m.Outbox) == 0 || m.Outbox[0].ID != n.ID {
+		i := noticeIndex(m, n.ID)
+		if i < 0 {
 			return nil
 		}
 		if err != nil {
-			m.Outbox[0].Attempts++
-			m.Outbox[0].Next = time.Now().Add(time.Duration(1<<min(m.Outbox[0].Attempts, 6)) * time.Second)
+			m.Outbox[i].Attempts++
+			m.Outbox[i].Next = time.Now().Add(time.Duration(1<<min(m.Outbox[i].Attempts, 6)) * time.Second)
 		} else {
-			m.Outbox = m.Outbox[1:]
+			m.Outbox = append(m.Outbox[:i], m.Outbox[i+1:]...)
 		}
 		return nil
 	})
