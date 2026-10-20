@@ -410,10 +410,6 @@ func otherBots(st State, id, room string) bool {
 	return false
 }
 
-// mentioned reports whether a message addresses the agent: an explicit Matrix mention, or the
-// bot's own user ID or localpart appearing in the raw body, which includes the quoted text a
-// client puts in a reply. Localpeople are prefix-safe because bot localparts are long enough
-// to stay distinguishable.
 // explicitlyMentioned checks Matrix's structured mention metadata, which modern
 // Element clients use even when their plain-text body shows only a display name.
 func explicitlyMentioned(ev Event, user string) bool {

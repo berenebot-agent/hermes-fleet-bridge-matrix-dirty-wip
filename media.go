@@ -547,7 +547,6 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 				return err
 			}
 			if err = s.Update(func(st *State) error {
-				v := st.Members[id].Outbox
 				if i := noticeIndex(st.Members[id], n.ID); i >= 0 {
 					st.Members[id].Outbox[i].Media.Uploaded = result.URI
 				}
