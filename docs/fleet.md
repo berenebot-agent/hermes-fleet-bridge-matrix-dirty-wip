@@ -166,6 +166,73 @@ Use a clean initial home, not a live agent home labeled Clean. Templates appear
 in the menu without restarting the bridge. Creation validates Compose/storage;
 a missing/broken template does not become a runnable agent.
 
+### The `vanilla` template
+
+`data/templates/vanilla` is a ready-to-edit clean template: the fleet's
+Compose shape, the shared provider credential, and a minimal Hermes home
+(`config.yaml`, `SOUL.md`, an empty `memories/USER.md`, an empty
+`channel_directory.json`) with no memories, histories or credentials of its
+own beyond the provider key.
+
+```text
+data/templates/vanilla/
+├── docker-compose.yml    # the shape every created agent gets
+├── .env                  # provider credentials, shared by every copy
+├── .env.example          # the same, without the secret
+├── fleet-template.json   # {"Kind":"Clean"}
+└── data/                 # the Hermes home
+```
+
+It lives under `data/`, so it is **not** tracked in git — it carries a live
+provider credential. Back it up with the rest of `data/`, and recreate it from
+the recipe below if it is lost.
+
+Edit it host-side; the bridge re-reads templates on every menu open, so
+nothing needs restarting. Then create agents from it in the Fleet room:
+
+```text
+!fleet create nova from vanilla
+```
+
+Two things to know:
+
+- **The provider credential is shared.** Every agent created from this
+  template uses the same `TILLER_ROUTER_KEY` from `.env`. Change that file to
+  change the credential set for future creations; existing agents keep the
+  copy they were created with. The bridge never reads or rewrites `.env`; it
+  only writes its own four `API_SERVER_*` settings into each agent's
+  `data/.env`, with a fresh random key per agent.
+- **Leave `API_SERVER_PORT` out of the template.** The bridge allocates each
+  new agent its own port (18642 upwards) and writes it. A port set in the
+  template would be applied to every agent created from it.
+
+A newly created agent needs no Hermes onboarding: the home is already
+configured and the credential is in place. Its first `docker compose up`
+installs the image's Python dependencies, which can exceed the bridge's
+`START_TIMEOUT`; the operation is then held and `!fleet retry` completes it
+once the container is ready.
+
+To rebuild the template from scratch, copy an existing agent's Compose file,
+`.env` and Hermes config, then write the manifest and a minimal home:
+
+```sh
+cd /opt/hermes-matrix
+mkdir -p data/templates/vanilla/data/memories
+cp data/fleet/<agent>/docker-compose.yml data/templates/vanilla/
+cp data/fleet/<agent>/.env data/templates/vanilla/
+cp data/fleet/<agent>/.env.example data/templates/vanilla/
+cp data/fleet/<agent>/data/config.yaml data/templates/vanilla/data/
+printf '{"Kind":"Clean"}\n' > data/templates/vanilla/fleet-template.json
+chmod 600 data/templates/vanilla/.env
+```
+
+Drop the `container_name` line from the copied Compose file and leave out
+`API_SERVER_*` keys. `data/config.yaml` carries the provider and model
+settings but no secret: the provider key comes from `.env` via
+`providers.<name>.key_env`. Copy `data/SOUL.md` and a `data/memories/USER.md`
+too if the new agent should have a persona or a user profile; leave them out
+for a bare agent.
+
 `!fleet save-template iris as iris-snapshot` creates a **Full snapshot** template.
 It copies all persistent files, including memories, conversation databases,
 instructions, skills, provider credentials and integration settings. It is an
