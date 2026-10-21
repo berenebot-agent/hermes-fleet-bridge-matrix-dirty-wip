@@ -63,8 +63,19 @@ func restoreMenuStore(t *testing.T, e *Engine) {
 	e.s = s
 }
 
-func TestMenuReplyModeAndContextDoNotWake(t *testing.T) {
-	e, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { t.Error("local control woke Hermes"); w.WriteHeader(500) })
+func TestMenuReplyModeDoesNotWakeAndContextReportsTheAPI(t *testing.T) {
+	e, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/capabilities":
+			fakeCapabilities(w)
+		case r.URL.Path == "/health/detailed":
+			fakeHealth(w)
+		case strings.HasPrefix(r.URL.Path, "/api/sessions/"):
+			replyJSON(w, map[string]any{"object": "hermes.session", "session": map[string]any{"id": "s1", "input_tokens": 10}})
+		default:
+			t.Errorf("unexpected API call %s", r.URL.Path)
+		}
+	})
 	room := "!team:chat.test"
 	s.Update(func(st *State) error { st.Members["iris"].Rooms[room] = &Room{Mention: true}; return nil })
 	menuCommandTest(t, e, "home", room, "!menu")
@@ -84,8 +95,12 @@ func TestMenuReplyModeAndContextDoNotWake(t *testing.T) {
 	}
 	menuCommandTest(t, e, "context", room, "!context")
 	m := s.View().Members["iris"]
-	if !strings.Contains(m.Outbox[len(m.Outbox)-1].Text, "HTTP API does not expose") {
-		t.Fatal("context blocker was hidden")
+	report := m.Outbox[len(m.Outbox)-1].Text
+	if !strings.Contains(report, "input_tokens") {
+		t.Fatalf("context report does not carry the API counters: %q", report)
+	}
+	if !strings.Contains(report, "not available") {
+		t.Fatalf("context report hides the live-occupancy limit: %q", report)
 	}
 	menuCommandTest(t, e, "another", room, "!help")
 	menuPickTest(t, e, "old-navigation", "another-menu", "5️⃣")

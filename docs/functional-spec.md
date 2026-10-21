@@ -229,17 +229,29 @@ Prioritize and test:
 | Command / operation | Required behavior |
 | --- | --- |
 | `!menu`, `!help` | Fresh reaction controls; command text available under More → Command help |
-| `!status` | Queue/run/held/reply status without waking the agent |
+| `!status` | Queue/run/held/reply status without waking the agent, plus the agent's live state (version, gateway state, platforms, today's counters) when it is running |
 | `!stop` | Request cancellation of this conversation's run and cancel its queue; leave other rooms running; never claim tool effects were undone |
+| `!steer <text>` | Inject guidance into this conversation's running turn through the Hermes run-steer API; refuse when no turn is running |
+| `!retry` | Re-submit this conversation's last recorded prompt as a new turn; tool effects from the earlier attempt are not undone |
+| `!version` | The agent's Hermes version from the live agent health endpoint; say plainly when the agent is stopped |
+| `!restart` | Administrator only: ask the agent's Hermes gateway to drain and restart itself through its own control socket, wait for the new gateway, and report whether it became ready again; queued work and history survive |
 | `!models [filter]`, `!model <model> [provider]` | Paginated model/provider choices, configured inventory with route fallback; finish with This chat / Global scope. Global updates all bridge-managed conversations/default for this agent, not Hermes global config; submitted payloads remain immutable |
 | `!new`, `!reset`, `!resume [filter]`, `!conversations [filter]` | Non-destructive, idle-only room conversation switching and filtered inventory |
-| `!context` | Explicit native-context HTTP API blocker; no fabricated occupancy or internal-file scraping |
+| `!context` | Report what the Hermes API exposes about this conversation's context: provider-reported cumulative counters, plus the stated limit (live occupancy and headroom are computed inside the gateway and no supported surface exposes them). No fabricated gauge, no internal-file scraping; may wake Hermes |
 | `!usage` | Verified cumulative session counters, separately labelled as not context occupancy; may wake Hermes |
 | `!approve <request-id>`, `!deny <request-id>` | This originating room/thread/session/run/exact request only; approve once or deny, never blanket grants |
 | `!require_mention on\|off` | Reply mode in additional rooms; dedicated room fixed to Always responds. Persisted per agent/room, commands/menu reactions exempt except an unaddressed command in a room shared by several fleet bots, which is refused with a pointer to the intended agent (`!stop` stays global) |
 | Background tasks | Only activity observable through the Hermes API contributes to idle safety; no arbitrary job-administration UI |
 
 **Mandatory feasibility gate:** Check the *actual Hermes HTTP API* for model selection, context inspection, cancellation, and approvals; do not assume Hermes native Matrix adapter features are automatically available to an API-based bridge. Unsupported commands must explain the limitation, not fake success. Model, context and stop are high-priority integration acceptance items.
+
+**Command parity with Telegram is a standing checklist, not a one-off decision.**
+Hermes is the chat platform in Telegram and an HTTP-API server here, so a Telegram
+command is only available in Matrix when the bridge can serve it from a supported
+surface (the HTTP API, or the agent's own gateway control socket). The mapping of
+every gateway-available Hermes command to its Matrix status, the surfaces behind it
+and the re-check procedure live in [command-parity.md](command-parity.md); a Hermes
+upgrade is re-checked against it.
 
 The MVP uses plain-text `!` commands because clients can intercept `/` commands. Those commands were delivered through Matrix in the integration checks. Status/cancellation/approvals are processed outside the blocked turn queue, and queued controls form a barrier before further dispatch in that conversation.
 

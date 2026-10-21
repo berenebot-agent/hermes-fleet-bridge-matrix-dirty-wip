@@ -249,7 +249,7 @@ func (e *Engine) menuCommand(ctx context.Context, id, turn string) bool {
 	if action == "" {
 		return false
 	}
-	if action == "status" || action == "stop" || action == "usage" || action == "approve" || action == "deny" {
+	if action == "status" || action == "stop" || action == "usage" || action == "approve" || action == "deny" || action == "context" {
 		_ = e.s.Update(func(st *State) error {
 			v := findTurn(st.Members[id], turn)
 			v.Text = "!" + action
@@ -304,9 +304,7 @@ func (e *Engine) menuCommand(ctx context.Context, id, turn string) bool {
 		case "help-text":
 			reply = helpText
 		case "context-menu":
-			post("Context and usage", []MenuOption{{Label: "Context window (API limitation)", Action: "context"}, {Label: "Cumulative usage (may wake agent)", Action: "usage"}})
-		case "context":
-			reply = "Hermes has a native /context report, but its supported HTTP API does not expose that report to this bridge. Context-window occupancy/headroom is unavailable here. Use !usage for verified cumulative session counters; those are not context occupancy."
+			post("Context and usage", []MenuOption{{Label: "Context report (wakes agent)", Action: "context"}, {Label: "Cumulative usage (may wake agent)", Action: "usage"}})
 		case "reply-menu":
 			if room == m.Room {
 				reply = "Reply mode: Always responds — dedicated room. Eligible messages never require a mention. Commands and menu reactions remain available without mentions."

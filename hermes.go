@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -55,10 +57,20 @@ type capabilities struct {
 	} `json:"features"`
 }
 type detailedHealth struct {
-	Status    string `json:"status"`
-	Busy      *bool  `json:"gateway_busy"`
-	Drainable *bool  `json:"gateway_drainable"`
-	Active    *int   `json:"active_agents"`
+	Status       string `json:"status"`
+	Version      string `json:"version"`
+	Busy         *bool  `json:"gateway_busy"`
+	Drainable    *bool  `json:"gateway_drainable"`
+	Active       *int   `json:"active_agents"`
+	GatewayState string `json:"gateway_state"`
+	Platforms    map[string]struct {
+		State string `json:"state"`
+	} `json:"platforms"`
+	MetricsToday struct {
+		Requests int `json:"requests"`
+		Messages int `json:"messages"`
+		Tokens   int `json:"tokens"`
+	} `json:"metrics_today"`
 	Readiness struct {
 		Status string `json:"status"`
 		Checks struct {
@@ -67,6 +79,9 @@ type detailedHealth struct {
 				Processes *int `json:"process_completions"`
 				Delegates *int `json:"active_delegations"`
 			} `json:"background_queues"`
+			Disk struct {
+				UsedPercent float64 `json:"used_percent"`
+			} `json:"disk"`
 		} `json:"checks"`
 	} `json:"readiness"`
 }
@@ -449,6 +464,93 @@ func (e *Engine) redact(s string) string {
 	}
 	return s
 }
+
+// sessionUsage reads the provider-reported cumulative counters of one Hermes session.
+func (e *Engine) sessionUsage(ctx context.Context, endpoint, id, sessionID string) (map[string]any, error) {
+	var usage map[string]any
+	if api(ctx, "GET", endpoint, "/api/sessions/"+url.PathEscape(sessionID), e.mx.key(id), nil, &usage, nil) != nil {
+		return nil, errors.New("session usage unavailable")
+	}
+	if nested, ok := usage["session"].(map[string]any); ok {
+		usage = nested
+	}
+	safe := map[string]any{}
+	for _, k := range []string{"message_count", "tool_call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"} {
+		if v, ok := usage[k]; ok {
+			safe[k] = v
+		}
+	}
+	return safe, nil
+}
+
+// lastUserPrompt reads the last user message Hermes recorded for a session. The bridge
+// clears finished turn text, so the agent's own record is the source for a retry.
+func (e *Engine) lastUserPrompt(ctx context.Context, endpoint, id, sessionID string) (string, error) {
+	var page struct {
+		Data []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"data"`
+	}
+	if api(ctx, "GET", endpoint, "/api/sessions/"+url.PathEscape(sessionID)+"/messages?limit=50&order=latest", e.mx.key(id), nil, &page, nil) != nil {
+		return "", errors.New("session messages unavailable")
+	}
+	for i := len(page.Data) - 1; i >= 0; i-- {
+		if page.Data[i].Role != "user" {
+			continue
+		}
+		var text string
+		if json.Unmarshal(page.Data[i].Content, &text) == nil {
+			return strings.TrimSpace(text), nil
+		}
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(page.Data[i].Content, &parts) == nil {
+			var b strings.Builder
+			for _, p := range parts {
+				b.WriteString(p.Text)
+			}
+			return strings.TrimSpace(b.String()), nil
+		}
+	}
+	return "", nil
+}
+
+// liveAgentState reads the agent's own view of itself — version, gateway state,
+// connected platforms and today's counters. It never wakes the agent and stays
+// silent when the agent is not running.
+func (e *Engine) liveAgentState(ctx context.Context, id string) string {
+	m := e.s.View().Members[id]
+	endpoint, err := e.docker.endpoint(ctx, m)
+	if err != nil {
+		return ""
+	}
+	var health detailedHealth
+	if api(ctx, "GET", endpoint, "/health/detailed", e.mx.key(id), nil, &health, nil) != nil {
+		return ""
+	}
+	state := ""
+	if health.Version != "" {
+		state = "Hermes " + health.Version
+	}
+	if health.GatewayState != "" {
+		if state != "" {
+			state += ", "
+		}
+		state += "gateway " + health.GatewayState
+	}
+	names := make([]string, 0, len(health.Platforms))
+	for name := range health.Platforms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		state += ", " + name + " " + health.Platforms[name].State
+	}
+	state += fmt.Sprintf("; today: %d requests, %d messages, %d tokens", health.MetricsToday.Requests, health.MetricsToday.Messages, health.MetricsToday.Tokens)
+	return state + ".\n"
+}
 func (e *Engine) tick(ctx context.Context, id string) {
 	if ctx.Err() != nil {
 		return
@@ -475,7 +577,7 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		fields := strings.Fields(t.Text)
 		if len(fields) > 0 {
 			switch fields[0] {
-			case "!menu", "!help", "!status", "!stop", "!approve", "!deny", "!discard", "!resend":
+			case "!menu", "!help", "!status", "!stop", "!approve", "!deny", "!discard", "!resend", "!restart", "!steer", "!retry", "!version", "!context":
 				urgent = true
 			}
 		}
@@ -745,18 +847,22 @@ func (e *Engine) startMember(ctx context.Context, id string) {
 
 const helpText = `Hermes fleet commands (send as plain text):
 !menu / !help — tappable, single-use reaction menus
-!status — bridge queue/run status, no wake
+!status — bridge queue/run status and live agent state, no wake
+!version — the agent's Hermes version
 !models [filter] — paginated model/provider picker (wakes agent)
 !model <model> [provider] — choose This chat / Global scope in a reaction menu
 !new / !reset — fresh conversation; preserve previous history, requires idle room
 !resume [filter] / !conversations — list bridge conversations by first prompt
-!context — explains the real-context API blocker, no wake
+!context — what the Hermes API exposes about this conversation's context (wakes agent)
 !usage — verified cumulative session usage (wakes agent); not context occupancy
 !stop — stop this conversation's run and cancel its queue
+!steer <text> — inject guidance into this conversation's running turn
+!retry — re-submit this conversation's last prompt as a new turn
 !approve <request-id> / !deny <request-id> — this conversation's exact approval, once
 !discard <turn-id> — release an uncertain turn only after confirmed inactivity; resend explicitly if desired
 !resend — retry blocked Matrix replies (a visible duplicate remains possible)
 !require_mention on|off — reply mode in additional rooms; dedicated room always responds
+!restart — administrator only: restart this agent's Hermes gateway
 
 Use the main room: new thread prompts are unsupported. New/Resume changes future Hermes history, not the visible Matrix history. Global model scope affects only this agent's bridge-managed chats/default, not Hermes global settings. Tools/filesystem are shared. No E2EE: the server can read messages.`
 
@@ -795,8 +901,108 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 			}
 		}
 		reply = fmt.Sprintf("Agent %s; rooms served: %d; dispatch enabled: %t; pending: %d; reply outbox: %d.\n", id, len(m.Rooms), m.Enabled, pending(m), len(m.Outbox)) + strings.Join(lines, "\n")
+		if live := e.liveAgentState(ctx, id); live != "" {
+			reply += live
+		}
 		if len(reply) > 12000 {
 			reply = reply[:12000]
+		}
+	case "!version":
+		endpoint, err := e.docker.endpoint(ctx, m)
+		if err != nil {
+			reply = "The agent is not running, so its Hermes version is unknown. Send a message to wake it."
+			break
+		}
+		var health detailedHealth
+		if api(ctx, "GET", endpoint, "/health/detailed", e.mx.key(id), nil, &health, nil) != nil || health.Version == "" {
+			reply = "The agent's Hermes version is unavailable."
+			break
+		}
+		reply = "Hermes " + health.Version + " (agent " + agentName(m) + ")."
+	case "!steer":
+		text := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(t.Text), "!steer"))
+		if text == "" {
+			reply = "Usage: !steer <text> — inject guidance into this conversation's running turn."
+			break
+		}
+		var target *Turn
+		for _, v := range m.Turns {
+			if v.Kind == "" && turnRoom(m, v) == conversation && v.Thread == t.Thread && v.RunID != "" && v.Phase == "running" {
+				target = v
+				break
+			}
+		}
+		if target == nil {
+			reply = "No running turn in this conversation can be steered."
+			break
+		}
+		endpoint, err := e.docker.endpoint(ctx, m)
+		if err != nil {
+			reply = "Cannot reach the agent's Hermes API; nothing was steered."
+			break
+		}
+		if api(ctx, "POST", endpoint, "/v1/runs/"+url.PathEscape(target.RunID)+"/steer", e.mx.key(id), map[string]string{"input": text}, nil, nil) != nil {
+			reply = "The running turn did not accept the steer instruction."
+			break
+		}
+		reply = "Steering instruction delivered to the running turn of this conversation."
+	case "!retry":
+		endpoint, _, err := e.ensure(ctx, id, conversation)
+		if err != nil {
+			reply = "Cannot reach a ready Hermes API, so the last prompt of this conversation is unknown."
+			break
+		}
+		{
+			session := m.Sessions[conversation][selectedKey(m, conversation)]
+			if session == nil {
+				reply = "This conversation has no Hermes session yet."
+				break
+			}
+			prompt, err := e.lastUserPrompt(ctx, endpoint, id, session.ID)
+			if err != nil || prompt == "" {
+				reply = "This conversation has no recorded prompt to retry."
+				break
+			}
+			retryID := session.ID + "-retry-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+			_ = e.s.Update(func(st *State) error {
+				member := st.Members[id]
+				member.Turns = append(member.Turns, &Turn{ID: retryID, Room: conversation, Thread: t.Thread, Sender: t.Sender, Text: prompt, Phase: "queued", Created: time.Now().UTC()})
+				return nil
+			})
+			reply = "Re-submitted the last prompt of this conversation as a new turn (" + retryID + "). Tool effects from the earlier attempt are not undone."
+		}
+	case "!restart":
+		if t.Sender != "@"+e.c.Admin+":"+e.c.ServerName {
+			reply = "Only the administrator can restart an agent's gateway."
+			break
+		}
+		if m.Paused || m.Draining || m.Deleted || !m.Enabled {
+			reply = "This agent is paused, draining or unavailable; nothing was restarted."
+			break
+		}
+		if e.s.View().FleetOperation != nil {
+			reply = "A fleet operation is in progress; wait for it to finish before restarting the gateway."
+			break
+		}
+		reply = e.restartGateway(ctx, id, conversation)
+	case "!context":
+		endpoint, _, err := e.ensure(ctx, id, conversation)
+		if err != nil {
+			reply = "Cannot reach a ready Hermes API, so this conversation's counters are unavailable."
+			break
+		}
+		{
+			session := m.Sessions[conversation][selectedKey(m, conversation)]
+			if session == nil {
+				reply = "This conversation has no Hermes session yet."
+				break
+			}
+			safe, err := e.sessionUsage(ctx, endpoint, id, session.ID)
+			if err != nil {
+				reply = "Session counters unavailable (the session may not have run yet)."
+				break
+			}
+			reply = "Live context occupancy and headroom are not available here: Hermes computes them inside the gateway from the live agent context, and no supported surface (the HTTP API or the gateway's control socket) exposes them. What the API does expose for this conversation, provider-reported and cumulative:\n" + string(jsonBytes(safe)) + "\nThese are cumulative counters, not current context-window occupancy."
 		}
 	case "!stop":
 		_ = e.s.Update(func(st *State) error {
@@ -835,21 +1041,12 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 				reply = "This conversation has no Hermes session yet."
 				break
 			}
-			var usage map[string]any
-			if api(ctx, "GET", endpoint, "/api/sessions/"+url.PathEscape(session.ID), e.mx.key(id), nil, &usage, nil) != nil {
+			safe, err := e.sessionUsage(ctx, endpoint, id, session.ID)
+			if err != nil {
 				reply = "Session usage unavailable (the session may not have run yet)."
-			} else {
-				if nested, ok := usage["session"].(map[string]any); ok {
-					usage = nested
-				}
-				safe := map[string]any{}
-				for _, k := range []string{"message_count", "tool_call_count", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "reasoning_tokens"} {
-					if v, ok := usage[k]; ok {
-						safe[k] = v
-					}
-				}
-				reply = "Verified cumulative session usage:\n" + string(jsonBytes(safe)) + "\nThese are cumulative counters, not current context-window occupancy; exact remaining context is unavailable."
+				break
 			}
+			reply = "Verified cumulative session usage:\n" + string(jsonBytes(safe)) + "\nThese are cumulative counters, not current context-window occupancy; exact remaining context is unavailable."
 		}
 	case "!approve", "!deny":
 		reply = "Usage: !approve <exact-request-id> or !deny <exact-request-id>, in its originating conversation."

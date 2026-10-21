@@ -196,7 +196,10 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   the rest stay silent — no reply, no nag, and never the other agent's addressing
   handed to a model as a prompt. Ordinary prose that merely names another agent is
   not affected.
-- `!status` — queue/run information without waking.
+- `!status` — queue/run information without waking, plus the agent's live state
+  (Hermes version, gateway state, connected platforms, today's counters) when it is
+  running.
+- `!version` — the agent's Hermes version; says so plainly when the agent is stopped.
 - `!models [filter]` — paginated configured model/provider choices, with advertised
   route IDs as a fallback (not a guarantee that every route is configured). Can wake
   the agent. Filter by model or provider text; use arrow reactions to change pages.
@@ -209,12 +212,24 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
 - `!new`, `!reset` — select a fresh conversation, preserving previous history.
 - `!resume [filter]`, `!conversations [filter]` — list/resume this room's bridge
   conversations; filter by first-prompt excerpt. No CLI/Telegram session imports.
-- `!context` — explains the real-context HTTP API blocker, without waking.
-- `!usage` — verified cumulative session counters, **not** live context-window
-  occupancy; can wake the agent. Hermes's native `/context` is not a prompt to
+- `!context` — what the Hermes API exposes about this conversation's context: the
+  provider-reported cumulative counters, and the reason live occupancy and headroom
+  are unavailable (Hermes computes them inside the gateway; no supported surface
+  exposes them). Can wake the agent. Hermes's native `/context` is not a prompt to
   forward: the bridge does not fake it or scrape internal files.
+- `!usage` — verified cumulative session counters, **not** live context-window
+  occupancy; can wake the agent.
 - `!stop` — request cancellation and cancel queued turns in this conversation;
   other rooms continue. Confirmed stopping never means tool effects were undone.
+- `!steer <text>` — inject guidance into this conversation's running turn without
+  interrupting it; refuses when no turn is running.
+- `!retry` — re-submit this conversation's last recorded prompt as a new turn; can
+  wake the agent. Tool effects from the earlier attempt are not undone.
+- `!restart` — **administrator only**: restart this agent's Hermes gateway. Hermes
+  drains its work and restarts itself, and the container's restart policy brings it
+  back; the bridge waits for the new gateway and reports whether it is ready again.
+  Conversations, history and pending work survive. It restarts the gateway process,
+  not the container, so a changed bridge-managed `data/.env` is not re-applied by it.
 - `!approve <request-id>` / `!deny <request-id>` — answer this conversation's
   current, exact tool approval. New main-room approvals also automatically offer
   Approve once / Deny reactions to the original sender. No blanket/permanent grants.
@@ -246,6 +261,13 @@ stable Matrix transaction IDs; `!resend` also retries blocked menu delivery.
 Unsupported commands never pretend to succeed or become agent instructions.
 Unrelated reactions, edits and unsupported event types do not wake agents.
 An authorized menu choice can wake an agent only for a control that needs its API.
+
+The Hermes commands that work in Telegram are **not** automatically available here:
+Hermes is the chat platform in Telegram, while the Matrix bridge is a client of the
+Hermes HTTP API. Every Telegram command is therefore re-implemented by the bridge
+where a supported surface exists, and named as unavailable where it does not.
+[command-parity.md](docs/command-parity.md) is the checklist of that mapping, the
+surfaces behind it and how to re-check it after a Hermes upgrade.
 
 ## Images, files and voice notes
 
