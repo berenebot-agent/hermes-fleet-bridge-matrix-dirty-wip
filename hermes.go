@@ -229,7 +229,7 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 	defer func() { rt := e.runtime(id); rt.mu.Lock(); delete(rt.busy, turn); rt.mu.Unlock() }()
 	m := e.s.View().Members[id]
 	t := findTurn(m, turn)
-	if t == nil || t.Phase == "done" || t.Phase == "held" || t.Kind != "" {
+	if t == nil || t.Phase == "done" || t.Phase == "held" || t.Phase == "steering" || t.Kind != "" {
 		return
 	}
 	if t.Media != nil && t.Phase == "queued" {
@@ -485,6 +485,138 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 		}
 	}
 }
+
+// steerTarget finds the running turn of one conversation that a follow-up can be steered
+// into. Only a running turn with a known run ID accepts steer input; a held or otherwise
+// uncertain turn never does.
+func steerTarget(m *Member, conversation, thread string) *Turn {
+	for _, v := range m.Turns {
+		if v.Kind == "" && turnRoom(m, v) == conversation && v.Thread == thread && v.RunID != "" && v.Phase == "running" {
+			return v
+		}
+	}
+	return nil
+}
+
+// steer injects a follow-up message into the running turn of its own conversation, the
+// way a Telegram follow-up steers the live turn: the running turn answers both messages
+// instead of the follow-up waiting behind it. A refused steer falls back to the queue, so
+// the message is never lost.
+func (e *Engine) steer(ctx context.Context, id, turn string) {
+	defer func() { rt := e.runtime(id); rt.mu.Lock(); delete(rt.busy, turn); rt.mu.Unlock() }()
+	m := e.s.View().Members[id]
+	t := findTurn(m, turn)
+	if t == nil || t.Kind != "" || t.Phase != "queued" || t.Stop {
+		return
+	}
+	conversation := turnRoom(m, t)
+	target := steerTarget(m, conversation, t.Thread)
+	if target == nil {
+		return
+	}
+	// Record the attempt before anything else: a turn already offered to a steer is
+	// never offered again, whatever the outcome.
+	if e.s.Update(func(st *State) error {
+		v := findTurn(st.Members[id], turn)
+		if v == nil {
+			return errors.New("the follow-up turn is gone")
+		}
+		v.SteerRunID = target.RunID
+		if v.Media != nil && v.Phase == "queued" {
+			v.Phase = "preparing"
+		}
+		return nil
+	}) != nil {
+		return
+	}
+	input := t.Text
+	if t.Media != nil {
+		// The attachment has to be staged, and a voice note transcribed, before its
+		// content can be steered into the running turn.
+		if err := e.prepareMedia(ctx, id, turn); err != nil {
+			e.steerQueued(id, turn, "The attachment could not be prepared, so your message is queued and runs next.")
+			return
+		}
+		m = e.s.View().Members[id]
+		t = findTurn(m, turn)
+		if t == nil || t.Phase == "done" || t.Stop {
+			return
+		}
+		input = mediaAttachment(t, t.Text)
+	}
+	if strings.TrimSpace(input) == "" {
+		e.steerQueued(id, turn, "Your message carried no text to steer, so it is queued and runs next.")
+		return
+	}
+	// Persist the intent before the remote call: a crash after the steer lands must not
+	// replay the message as a second turn.
+	if e.s.Update(func(st *State) error {
+		v := findTurn(st.Members[id], turn)
+		if v == nil {
+			return errors.New("the follow-up turn is gone")
+		}
+		if v.Phase == "done" {
+			return nil
+		}
+		v.Phase = "steering"
+		v.SteerRunID = target.RunID
+		return nil
+	}) != nil {
+		return
+	}
+	endpoint, err := e.docker.endpoint(ctx, m)
+	if err != nil {
+		e.steerQueued(id, turn, "The agent's API is unreachable, so your message is queued and runs next.")
+		return
+	}
+	if api(ctx, "POST", endpoint, "/v1/runs/"+url.PathEscape(target.RunID)+"/steer", e.mx.key(id), map[string]string{"input": input}, nil, nil) != nil {
+		e.steerQueued(id, turn, "The running turn did not accept your message, so it is queued and runs next.")
+		return
+	}
+	_ = e.s.Update(func(st *State) error {
+		member := st.Members[id]
+		v := findTurn(member, turn)
+		if v.Phase != "steering" {
+			return nil
+		}
+		v.Phase = "done"
+		member.LastActivity = time.Now().UTC()
+		addNotice(member, turn+"-steered", turnRoom(member, v), v.Thread, "Steered into the running turn of this conversation; the agent answers both messages together.")
+		return nil
+	})
+}
+
+// steerQueued returns a refused steer to the queue: the message is answered as its own
+// turn once the running turn finishes.
+func (e *Engine) steerQueued(id, turn, notice string) {
+	_ = e.s.Update(func(st *State) error {
+		member := st.Members[id]
+		v := findTurn(member, turn)
+		if v == nil || v.Phase == "done" || v.Phase == "held" {
+			return nil
+		}
+		v.Phase = "queued"
+		addNotice(member, turn+"-steer-queued", turnRoom(member, v), v.Thread, notice)
+		return nil
+	})
+}
+
+// holdSteer holds a follow-up whose steer outcome is unknown: the message may have
+// reached the running turn before the bridge restarted, so it is held rather than
+// repeated as a second turn.
+func (e *Engine) holdSteer(id, turn string) {
+	_ = e.s.Update(func(st *State) error {
+		member := st.Members[id]
+		v := findTurn(member, turn)
+		if v == nil || v.Phase != "steering" {
+			return nil
+		}
+		v.Phase = "held"
+		addNotice(member, turn+"-steer-held", turnRoom(member, v), v.Thread, "The bridge restarted while steering your message into the running turn, so it is not known whether the agent received it. It was held rather than repeated: confirm inactivity, then !discard "+turn+" to release it, or resend the message.")
+		return nil
+	})
+}
+
 func (e *Engine) redact(s string) string {
 	e.mx.mu.Lock()
 	defer e.mx.mu.Unlock()
@@ -610,6 +742,13 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	if rt.controls == nil {
 		rt.controls = map[string]bool{}
 	}
+	// A steer interrupted by a restart has an unknown outcome: the message may have
+	// reached the running turn. Hold it instead of repeating it as a second turn.
+	for _, t := range m.Turns {
+		if t.Phase == "steering" && !rt.busy[t.ID] {
+			e.holdSteer(id, t.ID)
+		}
+	}
 	for _, t := range m.Turns {
 		// The controller also dispatches the plain reply that answers a name prompt.
 		plain := m.Controller && t.Kind == ""
@@ -690,14 +829,24 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		if len(rt.busy) >= e.c.Parallel {
 			break
 		}
-		if t.Phase == "queued" && (!m.Enabled || sessions[sessionKey(turnRoom(m, t), t.Thread)] || controls[sessionKey(turnRoom(m, t), t.Thread)]) {
+		key := sessionKey(turnRoom(m, t), t.Thread)
+		if t.Phase == "queued" && (!m.Enabled || sessions[key] || controls[key]) {
+			// A plain follow-up that arrives while its conversation is busy is steered
+			// into the running turn instead of waiting behind it. A command, a turn
+			// already offered to a steer, or a conversation with no running turn keeps
+			// the message in the queue.
+			if m.Enabled && t.Kind == "" && t.SteerRunID == "" && sessions[key] && steerTarget(m, turnRoom(m, t), t.Thread) != nil {
+				rt.busy[t.ID] = true
+				e.wg.Add(1)
+				go func(turn string) { defer e.wg.Done(); e.steer(ctx, id, turn) }(t.ID)
+			}
 			continue
 		}
 		if t.Phase != "queued" && t.Phase != "preparing" && t.Phase != "submitting" && t.Phase != "running" {
 			continue
 		}
 		rt.busy[t.ID] = true
-		sessions[sessionKey(turnRoom(m, t), t.Thread)] = true
+		sessions[key] = true
 		e.wg.Add(1)
 		go func(turn string) { defer e.wg.Done(); e.work(ctx, id, turn) }(t.ID)
 	}
@@ -972,13 +1121,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 			reply = "Usage: !steer <text> — inject guidance into this conversation's running turn."
 			break
 		}
-		var target *Turn
-		for _, v := range m.Turns {
-			if v.Kind == "" && turnRoom(m, v) == conversation && v.Thread == t.Thread && v.RunID != "" && v.Phase == "running" {
-				target = v
-				break
-			}
-		}
+		target := steerTarget(m, conversation, t.Thread)
 		if target == nil {
 			reply = "No running turn in this conversation can be steered."
 			break
@@ -1058,7 +1201,7 @@ func (e *Engine) command(ctx context.Context, id, turn string) {
 				if v.Kind != "" || turnRoom(member, v) != conversation || v.Thread != t.Thread {
 					continue
 				}
-				if v.Phase == "queued" || (v.Phase == "preparing" && v.RunID == "" && v.Submitted.IsZero()) {
+				if v.Phase == "queued" || v.Phase == "steering" || (v.Phase == "preparing" && v.RunID == "" && v.Submitted.IsZero()) {
 					v.Phase = "done"
 				} else if activePhase(v.Phase) {
 					v.Stop = true

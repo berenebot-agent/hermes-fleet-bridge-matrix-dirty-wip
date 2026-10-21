@@ -1,5 +1,54 @@
 # MVP verification
 
+## Steered follow-ups — 2026-10-22
+
+A plain message that arrives while the agent is still working in the same
+conversation is now steered into that running turn instead of waiting behind
+it, the way a Telegram follow-up steers the live turn. The running turn
+answers both messages: the follow-up is not a second turn and does not start a
+second run.
+
+- The steer uses the Hermes run-steer API (`POST /v1/runs/{id}/steer`), the
+  same surface `!steer` uses. Only a running turn with a known run ID accepts
+  it, so a held, uncertain or not-yet-admitted turn never receives one; that
+  message waits in the queue instead.
+- A follow-up carrying an attachment is staged and transcribed first, like any
+  other turn, and is steered as its transcript or as its staged local path. It
+  deliberately carries no file-transport marker: the reply belongs to the
+  running turn, which owns the outgoing directory.
+- A steer the agent refuses, or one the bridge cannot deliver, returns the
+  message to the queue, where it is answered as its own turn once the running
+  turn ends. The room says which of the two happened.
+- A steer interrupted by a bridge restart has an unknown outcome, so the
+  message is held rather than repeated; `!discard <turn-id>` releases it after
+  confirmed inactivity. This is the rule the bridge already applies to an
+  uncertain run.
+- `!steer` still works and still refuses when nothing is running.
+
+- `gofmt -l .` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T194253-go-gofmt_-l_.-3672686.log`.
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T194254-go-vet_._...-3672848.log`.
+- `go test -race -count=1 ./...` passed (31.586s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T194256-go-test_-race_-count=1_._...-3673036.log`.
+- New fake-endpoint coverage in `steer_test.go`: a follow-up is steered into
+  the running turn of its conversation; a steered attachment carries the staged
+  path and the vision hint but no file-transport marker; a refused steer
+  returns the message to the queue; a follow-up in another room and a follow-up
+  aimed at a held run are not steered; a steer left behind by a restart is
+  held, not repeated; the scheduler offers a steer exactly once.
+- `TestParallelSessionsButFIFOWithinSession` in `bridge_test.go` now states the
+  new contract: a follow-up inside a conversation is steered into the running
+  turn, so it never becomes a second run of that conversation.
+- **Not established by these checks.** The run-steer API has never been
+  exercised against a live member agent — `!steer` had only a fake-endpoint
+  test before this — so the wire behaviour of a real steer is unverified.
+  Hermes delivers steer text as its own user row at the next tool-batch
+  boundary, so a follow-up does not abort the tool call or model request
+  already in flight; that is the API's semantics, not an approximation. A
+  crash between the steer and the state write can still duplicate an
+  injection, the same residual risk `!steer` already carried.
+
 ## Session-named rooms — 2026-10-22
 
 Hermes already names every session: an instant title cut from the opening

@@ -435,20 +435,28 @@ func await(t *testing.T, condition func() bool) {
 func TestParallelSessionsButFIFOWithinSession(t *testing.T) {
 	var mu sync.Mutex
 	inputs := map[string]string{}
+	steered := ""
 	released := false
 	engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/v1/capabilities":
+		switch {
+		case r.URL.Path == "/v1/capabilities":
 			fakeCapabilities(w)
-		case "/health/detailed":
+		case r.URL.Path == "/health/detailed":
 			fakeHealth(w)
-		case "/v1/runs":
+		case r.URL.Path == "/v1/runs":
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
 			mu.Lock()
 			inputs[body["input"]] = body["session_id"]
 			mu.Unlock()
 			replyJSON(w, map[string]string{"run_id": stableID(body["input"]), "status": "running"})
+		case strings.HasSuffix(r.URL.Path, "/steer"):
+			var body map[string]string
+			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			steered = body["input"]
+			mu.Unlock()
+			replyJSON(w, map[string]any{"accepted": true})
 		default:
 			mu.Lock()
 			done := released
@@ -469,7 +477,9 @@ func TestParallelSessionsButFIFOWithinSession(t *testing.T) {
 	defer cancel()
 	engine.tick(ctx, "iris")
 	await(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(inputs) == 2 })
+	await(t, func() bool { return findTurn(s.View().Members["iris"], "a1").Phase == "running" })
 	engine.tick(ctx, "iris")
+	await(t, func() bool { mu.Lock(); defer mu.Unlock(); return steered != "" })
 	mu.Lock()
 	if len(inputs) != 2 {
 		t.Error("same-session turn ran concurrently")
@@ -485,8 +495,13 @@ func TestParallelSessionsButFIFOWithinSession(t *testing.T) {
 	await(t, func() bool { return findTurn(s.View().Members["iris"], "a2").Phase == "done" })
 	mu.Lock()
 	defer mu.Unlock()
-	if len(inputs) != 3 {
-		t.Fatal("second FIFO turn missing")
+	// The follow-up was steered into the running turn of its own conversation, so it
+	// never became a second run of that conversation.
+	if len(inputs) != 2 {
+		t.Fatal("the same-session follow-up ran as a second turn")
+	}
+	if !strings.Contains(steered, "A2") {
+		t.Fatalf("the follow-up was not steered into the running turn: %q", steered)
 	}
 	for text, session := range inputs {
 		if strings.Contains(text, "A1") && (!strings.Contains(text, "root A") || session == "") {

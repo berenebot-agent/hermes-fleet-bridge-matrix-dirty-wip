@@ -107,6 +107,9 @@ type Turn struct {
 	Media                                            *Attachment
 	Completed                                        time.Time
 	MediaCleaned                                     bool
+	// SteerRunID names the run a follow-up was steered into. It is set before the
+	// remote steer call and kept afterwards, so a refused steer is not retried.
+	SteerRunID string
 	// ToolSeq is the next run-event sequence this turn expects. It resumes the
 	// Hermes event stream after a controller restart without repeating a line.
 	ToolSeq int
@@ -381,7 +384,7 @@ func openStore(c Config) (*Store, error) {
 				return nil, errors.New("invalid inbound media state; restore a consistent backup")
 			}
 			switch t.Phase {
-			case "queued", "preparing", "submitting", "running", "held", "processing", "done":
+			case "queued", "preparing", "submitting", "running", "steering", "held", "processing", "done":
 			default:
 				f.Close()
 				return nil, errors.New("unknown turn phase; refuse unsafe recovery")
@@ -523,7 +526,7 @@ func findTurn(m *Member, id string) *Turn {
 	return nil
 }
 func activePhase(p string) bool {
-	return p == "preparing" || p == "submitting" || p == "running" || p == "held"
+	return p == "preparing" || p == "submitting" || p == "running" || p == "steering" || p == "held"
 }
 func pending(m *Member) int {
 	n := 0

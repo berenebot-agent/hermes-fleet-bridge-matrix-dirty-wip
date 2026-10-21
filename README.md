@@ -53,8 +53,17 @@ Switching requires no queued/running/held work, pending controls or undelivered
 non-menu replies in that room. A switch is announced but does not rearrange Matrix
 history. New thread prompts/commands receive an explanation instead of being
 dispatched; existing thread history, mappings and admitted work are preserved.
-Different rooms can run concurrently; turns within a conversation remain FIFO.
+Different rooms can run concurrently; a conversation runs one turn at a time, and a
+follow-up is steered into the running turn rather than queued behind it.
 Conversations share the agent's tools/filesystem, not a sandbox.
+
+**A message sent while the agent is still working is steered into the running
+turn.** It does not wait for the current answer and it is not a second turn: the
+agent receives it inside the turn it is already in, and one reply answers both.
+An attachment is staged and transcribed first and is steered the same way. If the
+agent refuses the steer — the turn ended in the meantime, say — the message falls
+back to the queue and is answered on its own right afterwards. The room says which
+of the two happened.
 
 **Room names follow the conversation.** Hermes names every session itself — an
 instant title from the opening message, then a short model-written title — and the
@@ -252,7 +261,8 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
 - `!stop` — request cancellation and cancel queued turns in this conversation;
   other rooms continue. Confirmed stopping never means tool effects were undone.
 - `!steer <text>` — inject guidance into this conversation's running turn without
-  interrupting it; refuses when no turn is running.
+  interrupting it; refuses when no turn is running. A plain follow-up is steered
+  automatically; this command steers explicitly.
 - `!retry` — re-submit this conversation's last recorded prompt as a new turn; can
   wake the agent. Tool effects from the earlier attempt are not undone.
 - `!restart` — **administrator only**: restart this agent's Hermes gateway. Hermes

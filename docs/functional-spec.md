@@ -154,7 +154,7 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 - Switch only when that room has no queued/running/held turns, pending controls or undelivered non-menu replies. Announce switches; never rearrange or erase the visible Matrix timeline.
 - New thread prompts/commands receive a main-room explanation and do not wake Hermes. Preserve existing thread mappings/history and safely reconcile previously admitted work; legacy replies retain their original routing. Threads are not included in the Resume picker.
 - Keep the bridge registry key stable while adopting a valid session ID returned by a completed run. Upstream `/v1/runs` resolves compression-continuation tips when resuming by ID; do not invoke source-ending forks.
-- Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). Session separation is conversation/history isolation, not isolation of shared files/tools.
+- Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). One turn runs per session at a time; a follow-up that arrives while that turn runs is steered into it (§7) instead of starting a second turn, and keeps its place in the order. Session separation is conversation/history isolation, not isolation of shared files/tools.
 - Preserve session identities across bridge and Hermes container restarts.
 - **Room names follow the conversation.** Hermes names each session itself; the bridge reads that name back from the Hermes API and writes it to the room's name as `<agent> — <session name>`. No extra model call: the name Hermes already chose is reused. The provisioned room keeps the plain agent name, which only `!fleet rename` may change, so the two writers never fight. Switching conversations moves the room's name to the newly selected conversation's name. A name is untrusted text: one line, bounded, free of control characters. A room name the operator chose is never overwritten, and a room the bridge cannot rename is left alone. The lookup is bounded and stops once a session's name is settled.
 - Support typing indicators while an agent starts and runs, insofar as Matrix clients display them.
@@ -175,6 +175,27 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. A text reply is sent as `org.matrix.custom.html` formatted markdown so Element renders bold and code instead of showing literal `**`, with the plain markdown `body` retained as the fallback. Token streaming is not part of this MVP.
 8. Relay each tool call of a running turn to the originating room/thread as one short summary line naming the tool and the argument preview the agent produced. The call's output is never relayed. Summaries precede the final answer and are capped per turn; `!tools off` hides them for one agent/room.
 9. Persist run and reply progress; acknowledge successful completion logically once.
+
+**Follow-ups during a running turn:**
+
+- A plain message that arrives while a turn is running in the same conversation is
+  steered into that running turn through the Hermes run-steer API, the way a Telegram
+  follow-up steers the live turn. The running turn answers both messages; the
+  follow-up is not a second turn.
+- Only a running turn with a known run ID accepts a steer. A held, uncertain or
+  not-yet-admitted turn never does; such a message waits in the queue.
+- A follow-up carrying an attachment is staged and transcribed first, like any other
+  turn, and is steered as its transcript or as its staged local path. It carries no
+  file-transport marker: the reply belongs to the running turn, which owns the
+  outgoing directory.
+- A steer the agent refuses, or one the bridge cannot deliver, returns the message to
+  the queue, where it is answered as its own turn once the running turn ends. Nothing
+  is dropped, and a refused steer is not offered again.
+- The bridge acknowledges both outcomes in the room: that the message was steered, or
+  that it is queued.
+- A steer interrupted by a bridge restart has an unknown outcome. The message is held
+  rather than repeated, and `!discard <turn-id>` releases it after confirmed
+  inactivity.
 
 **Container lifecycle notices:**
 
@@ -245,7 +266,7 @@ Prioritize and test:
 | `!menu`, `!help` | Fresh reaction controls; command text available under More → Command help |
 | `!status` | Queue/run/held/reply status without waking the agent, plus the agent's live state (version, gateway state, platforms, today's counters) when it is running |
 | `!stop` | Request cancellation of this conversation's run and cancel its queue; leave other rooms running; never claim tool effects were undone |
-| `!steer <text>` | Inject guidance into this conversation's running turn through the Hermes run-steer API; refuse when no turn is running |
+| `!steer <text>` | Inject guidance into this conversation's running turn through the Hermes run-steer API; refuse when no turn is running. A plain follow-up during a running turn is steered automatically; this command steers explicitly |
 | `!retry` | Re-submit this conversation's last recorded prompt as a new turn; tool effects from the earlier attempt are not undone |
 | `!version` | The agent's Hermes version from the live agent health endpoint; say plainly when the agent is stopped |
 | `!restart` | Administrator only: ask the agent's Hermes gateway to drain and restart itself through its own control socket, wait for the new gateway, and report whether it became ready again; queued work and history survive |

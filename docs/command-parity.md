@@ -57,7 +57,7 @@ is not `cli_only`) fall into three groups.
 | Hermes | Matrix | Surface |
 | --- | --- | --- |
 | `/restart` | `!restart` | Control socket `pause-for-update`: the gateway drains and exits, the container's restart policy brings it back |
-| `/steer` | `!steer <text>` | `POST /v1/runs/{id}/steer` |
+| `/steer` | `!steer <text>`; a plain follow-up during a running turn is steered automatically | `POST /v1/runs/{id}/steer` |
 | `/retry` | `!retry` | `GET /api/sessions/{id}/messages` for the last prompt, re-submitted as a new turn |
 | `/version` | `!version` | `GET /health/detailed` |
 | `/platforms`, `/agents` | folded into `!status` | `GET /health/detailed` |
