@@ -64,7 +64,9 @@ func (d *Docker) post(ctx context.Context, path string) error {
 	}
 	defer res.Body.Close()
 	io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
+	// Docker answers 304 when the container is already in the requested state,
+	// which is success for a stop: the goal is that it is not running.
+	if (res.StatusCode < 200 || res.StatusCode >= 300) && res.StatusCode != http.StatusNotModified {
 		return errors.New("Docker request failed")
 	}
 	return nil
@@ -291,8 +293,12 @@ func configureEnvKey(path, host string, port int, rotate bool) (string, error) {
 }
 
 type containerInfo struct {
-	ID         string                             `json:"Id"`
-	State      struct{ Running bool }             `json:"State"`
+	ID string `json:"Id"`
+	// Absolute form: containers from other projects must still identify themselves.
+	//
+	// Pointer so "not reported" stays distinct from "reported stopped": unknown
+	// state must keep counting as a mount holder.
+	State      *struct{ Running bool }            `json:"State"`
 	Config     struct{ Labels map[string]string } `json:"Config"`
 	HostConfig struct{ NetworkMode string }       `json:"HostConfig"`
 	Mounts     []struct {
@@ -337,6 +343,12 @@ func (d *Docker) mountHolders(ctx context.Context, dir string) ([]string, error)
 		var info containerInfo
 		if err := d.get(ctx, "/containers/"+v.ID+"/json", &info); err != nil {
 			return nil, err
+		}
+		// Only a container that is explicitly stopped is skipped: it holds no
+		// process, so it cannot write into the directory. An unreported state is
+		// treated as a holder, because its mounts cannot be shown to be safe.
+		if info.State != nil && !info.State.Running {
+			continue
 		}
 		for _, mount := range info.Mounts {
 			if mount.Type != "bind" || mount.Source == "" {
