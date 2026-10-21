@@ -552,6 +552,9 @@ func TestFleetFullCopySnapshotAndCleanCreation(t *testing.T) {
 func TestFleetCopyFailureRetryAndPublishedRecovery(t *testing.T) {
 	e, ctx, _, _ := fleetFixture(t)
 	source := e.s.View().Members["iris"]
+	// A symlink reaching outside the tree is copied as a symlink, not refused:
+	// the copy is faithful, and the target is only meaningful in the agent's
+	// own container.
 	outside := filepath.Join(t.TempDir(), "private")
 	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
 		t.Fatal(err)
@@ -560,18 +563,27 @@ func TestFleetCopyFailureRetryAndPublishedRecovery(t *testing.T) {
 	if err := os.Symlink(outside, link); err != nil {
 		t.Fatal(err)
 	}
+	// A destination owned by another operation is still refused.
+	dst := filepath.Join(e.c.FleetDir, "nova")
+	if err := os.Mkdir(dst, 0700); err != nil {
+		t.Fatal(err)
+	}
+	foreign := jsonBytes(fleetOwner{Operation: "someone-else", Identity: "else"})
+	if err := os.WriteFile(filepath.Join(dst, ".fleet-owner.json"), foreign, 0600); err != nil {
+		t.Fatal(err)
+	}
 	fleetTestCommand(t, e, ctx, "!fleet copy iris to nova")
 	for i := 0; i < 3; i++ {
 		e.fleetStep(ctx)
 	}
 	op := e.s.View().FleetOperation
 	if op == nil || op.Error == "" || !e.s.View().Members["iris"].Draining {
-		t.Fatal("unsafe copy did not hold source")
+		t.Fatal("refused copy did not hold source")
 	}
-	if _, err := os.Stat(filepath.Join(e.c.FleetDir, "nova")); !os.IsNotExist(err) {
-		t.Fatal("incomplete copy was published")
+	if b, err := os.ReadFile(filepath.Join(dst, ".fleet-owner.json")); err != nil || string(b) != string(foreign) {
+		t.Fatal("destination owned by another operation was overwritten")
 	}
-	if err := os.Remove(link); err != nil {
+	if err := os.RemoveAll(dst); err != nil {
 		t.Fatal(err)
 	}
 	fleetTestCommand(t, e, ctx, "!fleet retry")
@@ -588,6 +600,9 @@ func TestFleetCopyFailureRetryAndPublishedRecovery(t *testing.T) {
 	completeFleetTestOperation(t, e, ctx)
 	if fleetMember(e.s.View(), "nova") == nil {
 		t.Fatal("published copy was not recovered")
+	}
+	if got, err := os.Readlink(filepath.Join(dst, "data", "outside-link")); err != nil || got != outside {
+		t.Fatalf("external symlink was not copied faithfully: %q %v", got, err)
 	}
 }
 

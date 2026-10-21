@@ -354,7 +354,10 @@ func validateFleetCompose(config map[string]any, dir string) error {
 	return nil
 }
 
-// Full snapshots preserve regular files and internal symlinks, never external symlinks or devices.
+// copyFleetTree copies a managed directory: files and modes verbatim, symlinks as
+// symlinks. Sockets, devices and fifos are runtime artefacts, not state, so they are
+// skipped the way `tar` and `docker cp` skip them rather than failing the whole copy.
+// A symlink pointing inside the copied tree is repointed at the new location.
 func copyFleetTree(ctx context.Context, src, dst string) error {
 	if err := realDirectory(src); err != nil {
 		return err
@@ -395,12 +398,12 @@ func copyFleetTree(ctx context.Context, src, dst string) error {
 			if err != nil {
 				return errors.New("cannot read snapshot symlink")
 			}
-			resolved, err := filepath.EvalSymlinks(path)
-			if err != nil || !pathWithin(src, resolved) {
-				return errors.New("snapshot contains an external or broken symlink; refusing incomplete/unsafe copy")
-			}
-			if filepath.IsAbs(link) {
-				link = filepath.Join(dst, strings.TrimPrefix(strings.TrimPrefix(link, src), string(os.PathSeparator)))
+			if filepath.IsAbs(link) && pathWithin(src, link) {
+				rel, err := filepath.Rel(src, link)
+				if err != nil {
+					return err
+				}
+				link = filepath.Join(dst, rel)
 			}
 			return os.Symlink(link, target)
 		case info.Mode().IsRegular():
@@ -423,7 +426,8 @@ func copyFleetTree(ctx context.Context, src, dst string) error {
 			}
 			return nil
 		default:
-			return errors.New("snapshot contains a socket, device or other special file; stop its writers and remove the transient file before retrying")
+			// Socket, device or fifo: live runtime state, never persistent state.
+			return nil
 		}
 	})
 }
@@ -608,28 +612,6 @@ func (e *Engine) publishFleetCopy(ctx context.Context, op *FleetOperation, sourc
 		if err = atomicFile(filepath.Join(stage, "fleet-settings.json"), jsonBytes(settings)); err != nil {
 			return err
 		}
-	}
-	// Internal absolute symlinks must refer to the final location, not staging.
-	if err = filepath.WalkDir(stage, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			link, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			if filepath.IsAbs(link) && pathWithin(stage, link) {
-				rel, _ := filepath.Rel(stage, link)
-				if err = os.Remove(path); err != nil {
-					return err
-				}
-				return os.Symlink(filepath.Join(dst, rel), path)
-			}
-		}
-		return nil
-	}); err != nil {
-		return errors.New("cannot finalize internal snapshot symlinks")
 	}
 	if err = atomicFile(filepath.Join(stage, "fleet-compose.json"), jsonBytes(config)); err != nil {
 		return err

@@ -267,10 +267,12 @@ Two things to know:
   template would be applied to every agent created from it.
 
 A newly created agent needs no Hermes onboarding: the home is already
-configured and the credential is in place. Its first `docker compose up`
-installs the image's Python dependencies, which can exceed the bridge's
-`START_TIMEOUT`; the operation is then held and `!fleet retry` completes it
-once the container is ready.
+configured and the credential is in place. A **baked** template (see
+[baking a template](#baking-a-template)) also carries its installed Python
+environment, so agents created from it are ready in seconds. An unbaked
+template still works, but its first start installs those dependencies and can
+exceed the bridge's `START_TIMEOUT`; the operation is then held and
+`!fleet retry` completes it once the container is ready.
 
 To rebuild the template from scratch, copy an existing agent's Compose file,
 `.env` and Hermes config, then write the manifest and a minimal home:
@@ -292,6 +294,34 @@ settings but no secret: the provider key comes from `.env` via
 `providers.<name>.key_env`. Copy `data/SOUL.md` and a `data/memories/USER.md`
 too if the new agent should have a persona or a user profile; leave them out
 for a bare agent.
+
+### Baking a template
+
+A template is an agent's persistent directory, so it can carry the agent's
+**installed tooling** as well as its configuration. Baking means running that
+directory once so Hermes installs its Python environment into it, then stopping
+the container: the directory is the template, and agents created from it start
+in seconds rather than installing on first use.
+
+```sh
+cd /opt/hermes-matrix
+
+# From an existing agent: copy a stopped agent's directory into a new template.
+./bake-fleet-template.sh data/fleet/purple-shirt-1 my-template
+
+# Or warm a template that already exists.
+./bake-fleet-template.sh --warm my-template
+```
+
+The copy is verbatim: files, modes and symlinks as they are, with the source's
+own `.fleet-owner.json` and template manifest left behind. Live sockets and
+devices are runtime state and are not copied. `--warm` uses the template's own
+`docker-compose.yml`, publishes nothing, provisions no Matrix account and stops
+the project afterwards, so the template has no room or identity of its own.
+
+Baked templates are larger than bare ones because they contain the dependency
+environment, and every agent created from one carries its own copy. Budget for
+that on the data volume.
 
 `!fleet save-template iris as iris-snapshot` creates a **Full snapshot** template.
 It copies all persistent files, including memories, conversation databases,
@@ -331,11 +361,24 @@ cause readiness failure. Published service ports use fresh Docker-assigned ports
 not the source's fixed host ports. Copies sharing external Compose networks or
 volumes are refused; use project-owned networking instead.
 
-Snapshots reject sockets, devices, broken/external symlinks and independent nested
-mounts, rather than pretending to copy them. Internal symlinks are preserved and
-relocated. Files/directories are private to the bridge user; images must be able
-to use that user's persistent home. Existing containers' writable layers are not
-persistent state and are not copied.
+A copy reproduces the agent's directory as `cp -a` would: regular files, their
+modes and every symlink travel as they are, hard links are preserved and links
+pointing inside the tree follow the copy. Socket, device and fifo files are
+runtime state rather than agent data, so they are skipped the way `tar` and
+`docker cp` skip them instead of failing the copy. Independent nested mounts are
+still refused: mount only the fleet/template parents. Files/directories are
+private to the bridge user; images must be able to use that user's persistent
+home. Existing containers' writable layers are not persistent state and are not
+copied.
+
+Because the copy is faithful, a template can carry a **baked** Hermes
+environment — the venv, cached packages and plugin state that otherwise have to
+be installed on first start. `./bake-fleet-template.sh` copies a stopped agent
+into a template, and `./bake-fleet-template.sh --warm <name>` boots an existing
+template once so its tooling installs, then stops it. Neither provisions Matrix:
+no account, room or bridge involvement. A baked template starts its agents in
+seconds instead of performing the install on first use, and it contains no live
+sockets afterwards.
 
 ## Permanent deletion and retained Matrix history
 
