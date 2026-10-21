@@ -100,6 +100,8 @@ case "${1:-}" in
 	# tar copies files, modes and symlinks verbatim and skips only sockets and
 	# devices, which are runtime state rather than agent data.
 	tar -C "$src" -cf - . 2>/dev/null | tar -C "$dst" -xf - 2>/dev/null
+	# Preserve the baked dependency selection; merging config keys can drop plugins.
+	cmp -s "$src/data/config.yaml" "$dst/data/config.yaml" || die "copied config.yaml differs or is missing; template is incomplete"
 	# The source's ownership record and template manifest belong to the source.
 	rm -f "$dst/.fleet-owner.json" "$dst/fleet-template.json"
 	printf '{"Kind":"Clean"}\n' >"$dst/fleet-template.json"

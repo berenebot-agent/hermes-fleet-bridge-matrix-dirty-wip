@@ -341,15 +341,20 @@ adding dependencies or updating Hermes can rebuild the environment and grow the
 directory again. Recheck imports and actual tool execution on image upgrades;
 successful chat alone does not verify every optional Hermes feature.
 
-**Keep `plugins.enabled` in step with the installed plugins.** Hermes builds the
-dependency environment from the enabled plugin list, not from what is present
-on disk. A home whose `config.yaml` lists no enabled plugin rebuilds without
-its installed plugins and loses their dependencies: `homeassistant` needs
-`aiohttp`, and without it the API server has no adapter, the gateway logs
-`API Server: aiohttp not installed`, and the agent never answers a message.
-The bake helper refuses a template whose installed plugins are not all enabled,
-so a template cannot carry that inconsistency.
+**Keep the baked configuration with its dependency environment.** Hermes builds
+the dependency environment from the enabled plugin list, not simply the plugin
+directories on disk. Preserve `plugins.enabled` when copying a baked home;
+merging selected config keys can silently lose it. The bake helper checks that
+the copied `config.yaml` is byte-identical to its source. Installed plugins may
+legitimately be disabled; their presence alone does not mean they must be enabled.
 
+If startup fails for an ordinary message, the bridge holds the turn and queues
+a failure notice distinguishing a stopped container from a running container
+whose Hermes API did not become ready. If Docker inspection fails, it reports
+only that API readiness could not be established. It does not read container
+logs or expose raw errors. A missing dependency such as `aiohttp` is one possible
+cause, not a diagnosis inferred solely from a running container. Inspect locally
+and use `!discard` only after confirming inactivity; there is no automatic replay.
 
 `!fleet save-template iris as iris-snapshot` creates a **Full snapshot** template.
 It copies all persistent files, including memories, conversation databases,

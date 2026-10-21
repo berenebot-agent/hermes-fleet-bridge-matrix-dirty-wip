@@ -17,7 +17,9 @@ with tempfile.TemporaryDirectory() as tmp:
         path = source / "data" / name
         path.mkdir(parents=True)
         (path / "keep").write_text("fixture")
-    (source / "data/config.yaml").write_text("plugins: {}\n")
+    (source / "data/config.yaml").write_text("plugins: {enabled: [homeassistant]}\n")
+    (source / "data/plugins/homeassistant").mkdir(parents=True)
+    (source / "data/plugins/homeassistant/pyproject.toml").write_text("x")
     (source / "data/installs/id/environments/id/workspace/tools/terminal_tool.py").write_text("keep source")
     (source / "data/cache/unrelated").write_text("keep")
     (source / ".env").write_text("PROVIDER_KEY=fixture\n")
@@ -25,6 +27,7 @@ with tempfile.TemporaryDirectory() as tmp:
     env = {**os.environ, "FLEET_TEMPLATE_DIR": str(templates)}
     subprocess.run([str(script), str(source), "basic"], env=env, check=True)
     data = templates / "basic/data"
+    assert (data / "config.yaml").read_bytes() == (source / "data/config.yaml").read_bytes()
     assert not (data / "cache/uv").exists()
     tools = data / "installs/id/environments/id/workspace/tools"
     assert os.readlink(tools / "python-3.14-linux-x64") == "/opt/hermes/tools/python-3.14-linux-x64"
@@ -34,6 +37,11 @@ with tempfile.TemporaryDirectory() as tmp:
     assert (data / "cache/unrelated").exists()
     assert (data / "plugins/keep").exists()
     assert (source / "data/cache/uv/keep").exists(), "source must not be pruned"
+
+    # Disabled installed plugins are legitimate; keep the selection unchanged.
+    (source / "data/config.yaml").write_text("plugins: {enabled: [], disabled: [homeassistant]}\n")
+    subprocess.run([str(script), str(source), "disabled"], env=env, check=True)
+    assert (templates / "disabled/data/config.yaml").read_bytes() == (source / "data/config.yaml").read_bytes()
 
     binary = root / "bin"
     binary.mkdir()

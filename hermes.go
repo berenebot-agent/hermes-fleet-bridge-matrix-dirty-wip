@@ -208,6 +208,17 @@ func (e *Engine) fail(id, turn, message string, held bool) {
 		return nil
 	})
 }
+
+func (e *Engine) apiUnavailableMessage(ctx context.Context, m *Member) string {
+	message := "Cannot reach a ready, durably idempotent Hermes API."
+	if _, err := e.docker.endpoint(ctx, m); errors.Is(err, errStopped) {
+		message = "The agent container is not running."
+	} else if err == nil {
+		message = "The agent container is running, but its Hermes API did not become ready. Check its dependency environment and API configuration locally."
+	}
+	return message + " No automatic replay; use !discard only after confirming inactivity."
+}
+
 func (e *Engine) work(ctx context.Context, id, turn string) {
 	defer func() { rt := e.runtime(id); rt.mu.Lock(); delete(rt.busy, turn); rt.mu.Unlock() }()
 	m := e.s.View().Members[id]
@@ -252,7 +263,7 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 		return
 	}
 	if err != nil {
-		e.fail(id, turn, "Cannot reach a ready, durably idempotent Hermes API. No automatic replay; check the agent configuration and use !discard after confirming inactivity.", true)
+		e.fail(id, turn, e.apiUnavailableMessage(ctx, m), true)
 		return
 	}
 	if t.Phase == "held" {
