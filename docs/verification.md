@@ -3,6 +3,25 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
+## Container lifecycle notices — 2026-10-21
+
+The agent's own room now reports container lifecycle: it announces the Compose
+project start, the authenticated readiness, and the shutdown after the idle timeout
+or an operator Fleet stop. A shutdown that fails is reported once, and the retry
+does not repeat the message. The notices are ordinary reply-outbox entries, so they
+are durable, ordered and retried like any other reply, and they carry no secrets.
+
+Passed through the Docker wrapper: `gofmt -l .`, `vet ./...` and the full local
+`test -race ./...` suite. The added test covers the start/ready pair, the idle
+shutdown notice and the failed-shutdown notice with its no-repeat guard, using the
+local fake Docker, Hermes and HTTP endpoints only.
+
+Log: `tests/logs/hermes-fleet-bridge-matrix-go/20261021T020532-go-test_-race_._...-1849776.log`.
+
+Not run for this change: real-image integration, a live deployment rebuild, real
+providers or Element Web interaction. The container lifecycle is unchanged; only the
+Matrix visibility of it is new.
+
 ## Public-URL and administrator-password reconciliation — 2026-10-21
 
 Public HTTPS origin changes now update controller metadata atomically while keeping

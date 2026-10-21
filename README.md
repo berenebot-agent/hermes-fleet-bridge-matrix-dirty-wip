@@ -44,6 +44,12 @@ dispatched; existing thread history, mappings and admitted work are preserved.
 Different rooms can run concurrently; turns within a conversation remain FIFO.
 Conversations share the agent's tools/filesystem, not a sandbox.
 
+Container lifecycle is visible in the agent's own room: the agent says when it is
+starting, when it is ready, and when it is shutting down after the idle timeout or an
+operator Fleet stop. These are ordinary replies, so they arrive in order with
+everything else and survive a restart; a shutdown that fails is reported once instead
+of being retried silently.
+
 **Security:** no E2EE; the server can read messages. The supplied human account is
 a Matrix server administrator, as requested. Room membership is the access
 boundary: anyone who can post in a room the bot has joined can use that agent

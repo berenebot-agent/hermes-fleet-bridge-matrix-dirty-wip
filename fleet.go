@@ -610,6 +610,10 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 		}
 		stopCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
+		// A deleted agent loses its outbox and its Matrix account, so it cannot be told.
+		if op.Action != "delete" {
+			e.lifecycleNote(a.ID, "stop", "Agent "+agentName(a)+" is shutting down (fleet "+op.Action+").")
+		}
 		if _, err := e.docker.compose(stopCtx, a, "down", "--remove-orphans", "--timeout", "60"); err != nil {
 			return err
 		}

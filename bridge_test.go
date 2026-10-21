@@ -742,6 +742,114 @@ func TestIdleShutdownRequiresAllActivityCounters(t *testing.T) {
 		t.Fatal("confirmed idle agent not stopped")
 	}
 }
+
+// Container lifecycle notices tell the agent's own room when its Compose project is started,
+// becomes ready and is stopped. A shutdown that keeps failing must not repeat its message.
+func TestContainerLifecycleNotices(t *testing.T) {
+	noticeTexts := func(m *Member) []string {
+		var out []string
+		for _, n := range m.Outbox {
+			out = append(out, n.Text)
+		}
+		return out
+	}
+	t.Run("start and ready", func(t *testing.T) {
+		engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/v1/capabilities":
+				fakeCapabilities(w)
+			case "/health/detailed":
+				fakeHealth(w)
+			default:
+				w.WriteHeader(500)
+			}
+		})
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "bin")
+		os.Mkdir(bin, 0700)
+		marker := filepath.Join(dir, "up")
+		os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\ntouch "+marker+"\n"), 0700)
+		t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+		s.Update(func(st *State) error {
+			st.Members["iris"].Dir = dir
+			return nil
+		})
+		labels := map[string]string{"com.docker.compose.project": "iris", "com.docker.compose.service": "hermes", "com.docker.compose.project.working_dir": dir}
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, err := os.Stat(marker); err != nil {
+				replyJSON(w, []any{})
+				return
+			}
+			if strings.Contains(r.URL.Path, "/containers/container") {
+				replyJSON(w, map[string]any{"Config": map[string]any{"Labels": labels}, "HostConfig": map[string]string{"NetworkMode": "host"}})
+				return
+			}
+			replyJSON(w, []any{map[string]any{"Id": "container", "Labels": labels}})
+		}))
+		defer server.Close()
+		u, _ := url.Parse(server.URL)
+		engine.docker.client = &http.Client{Transport: rewriteTransport{u, http.DefaultTransport}}
+		if _, _, err := engine.ensure(context.Background(), "iris", ""); err != nil {
+			t.Fatal(err)
+		}
+		m := s.View().Members["iris"]
+		texts := noticeTexts(m)
+		if len(texts) != 2 || !strings.Contains(texts[0], "is starting") || !strings.Contains(texts[1], "is ready") {
+			t.Fatalf("lifecycle notices missing: %v", texts)
+		}
+		for _, n := range m.Outbox {
+			if n.Room != m.Room {
+				t.Fatal("lifecycle notice left the agent's room")
+			}
+		}
+	})
+	t.Run("idle shutdown", func(t *testing.T) {
+		engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { fakeHealth(w) })
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "bin")
+		os.Mkdir(bin, 0700)
+		called := filepath.Join(dir, "called")
+		os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+called+"\n"), 0700)
+		t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+		engine.c.Idle = time.Second
+		s.Update(func(st *State) error {
+			m := st.Members["iris"]
+			m.Dir = dir
+			m.LastActivity = time.Now().Add(-time.Hour)
+			return nil
+		})
+		engine.idle(context.Background(), "iris")
+		b, err := os.ReadFile(called)
+		if err != nil || !strings.Contains(string(b), "down") {
+			t.Fatal("confirmed idle agent not stopped")
+		}
+		texts := noticeTexts(s.View().Members["iris"])
+		if len(texts) != 1 || !strings.Contains(texts[0], "is shutting down") {
+			t.Fatalf("shutdown notice missing: %v", texts)
+		}
+	})
+	t.Run("failed shutdown", func(t *testing.T) {
+		engine, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { fakeHealth(w) })
+		dir := t.TempDir()
+		bin := filepath.Join(dir, "bin")
+		os.Mkdir(bin, 0700)
+		os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 1\n"), 0700)
+		t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+		engine.c.Idle = time.Second
+		s.Update(func(st *State) error {
+			m := st.Members["iris"]
+			m.Dir = dir
+			m.LastActivity = time.Now().Add(-time.Hour)
+			return nil
+		})
+		engine.idle(context.Background(), "iris")
+		engine.idle(context.Background(), "iris")
+		texts := noticeTexts(s.View().Members["iris"])
+		if len(texts) != 2 || !strings.Contains(texts[0], "is shutting down") || !strings.Contains(texts[1], "is still running") {
+			t.Fatalf("failed shutdown notices wrong: %v", texts)
+		}
+	})
+}
 func TestGofmtWrapperFailsWhenFilesAreListed(t *testing.T) {
 	for _, listed := range []bool{false, true} {
 		t.Run(strconv.FormatBool(listed), func(t *testing.T) {

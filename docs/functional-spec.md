@@ -167,6 +167,15 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. A text reply is sent as `org.matrix.custom.html` formatted markdown so Element renders bold and code instead of showing literal `**`, with the plain markdown `body` retained as the fallback. Token streaming is not part of this MVP.
 8. Persist run and reply progress; acknowledge successful completion logically once.
 
+**Container lifecycle notices:**
+
+- The bridge posts a short notice in the agent's own provisioned room when it brings the
+  Compose project up, when authenticated readiness is reached, and when it takes the
+  project down (idle timeout or an operator fleet stop). A wake triggered from another
+  room still reports in the agent's own room, so container state has one home.
+- These are ordinary reply-outbox messages: durable, ordered, retried, and free of
+  secrets. A shutdown that fails is reported once; the retry does not repeat the message.
+
 **Idle shutdown:**
 
 - Only start idle timing after the bridge-managed queued/running turns for that agent have completed.

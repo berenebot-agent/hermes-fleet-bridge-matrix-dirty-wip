@@ -30,6 +30,10 @@ type agentRuntime struct {
 	controls    map[string]bool
 	lastMediaGC time.Time
 	started     bool
+	// stopNotice tracks the idle-shutdown announcement: 0 none, 1 "shutting down" sent,
+	// 2 the failed shutdown reported. It keeps a failing stop from repeating the message
+	// on every retry, and is guarded by lifecycle.
+	stopNotice int
 }
 type runStatus struct {
 	ID       string `json:"run_id"`
@@ -95,6 +99,20 @@ func (e *Engine) readyAPI(ctx context.Context, m *Member) (string, int, error) {
 	}
 	return endpoint, cap.Features.Idempotency.Retention, nil
 }
+
+// lifecycleNote queues a container-lifecycle message in the agent's own room. The reply outbox
+// already delivers notices durably, in order and with retries, so no extra Matrix path is
+// needed. The notice ID carries a timestamp because every lifecycle event is distinct.
+func (e *Engine) lifecycleNote(id, kind, text string) {
+	_ = e.s.Update(func(st *State) error {
+		m := st.Members[id]
+		if m == nil || m.Room == "" {
+			return nil
+		}
+		addNotice(m, id+"-"+kind+"-"+fmt.Sprintf("%d", time.Now().UnixNano()), m.Room, "", text)
+		return nil
+	})
+}
 func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, error) {
 	rt := e.runtime(id)
 	rt.lifecycle.Lock()
@@ -105,6 +123,8 @@ func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, erro
 	}
 	endpoint, retention, err := e.readyAPI(ctx, m)
 	if err == nil {
+		// The agent is up, so the next shutdown is a new cycle and may announce itself.
+		rt.stopNotice = 0
 		return endpoint, retention, nil
 	}
 	if !m.Enabled {
@@ -115,6 +135,7 @@ func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, erro
 	if err = e.docker.checkProject(startCtx, m); err != nil {
 		return "", 0, err
 	}
+	e.lifecycleNote(id, "start", "Agent "+agentName(m)+" is starting…")
 	started := false
 	if _, inspectErr := e.docker.endpoint(startCtx, m); inspectErr != nil {
 		if !errors.Is(inspectErr, errStopped) {
@@ -135,6 +156,7 @@ func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, erro
 		}
 		endpoint, retention, err = e.readyAPI(startCtx, m)
 		if err == nil {
+			e.lifecycleNote(id, "ready", "Agent "+agentName(m)+" is ready.")
 			return endpoint, retention, nil
 		}
 		if !started {
@@ -564,7 +586,18 @@ func (e *Engine) idle(ctx context.Context, id string) {
 	}
 	downCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	_, _ = e.docker.compose(downCtx, m, "down", "--timeout", "60")
+	if rt.stopNotice == 0 {
+		rt.stopNotice = 1
+		e.lifecycleNote(id, "stop", "Agent "+agentName(m)+" is shutting down (idle timeout).")
+	}
+	if _, err := e.docker.compose(downCtx, m, "down", "--timeout", "60"); err != nil {
+		if rt.stopNotice == 1 {
+			rt.stopNotice = 2
+			e.lifecycleNote(id, "stop-failed", "Agent "+agentName(m)+" is still running: shutdown failed. Inspect the member configuration locally.")
+		}
+		return
+	}
+	rt.stopNotice = 0
 }
 func (e *Engine) Start(ctx context.Context) {
 	members := e.s.View().Members

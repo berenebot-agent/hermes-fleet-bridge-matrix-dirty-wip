@@ -121,6 +121,9 @@ Commands:
 - **Pause:** block new work, drain admitted work, take the project down, and
   persist the paused state. Enable restores message-triggered wake without
   immediately starting containers.
+- The agent's own room shows the container lifecycle: it announces the start and
+  the readiness, and the shutdown a Fleet stop performs. A deleted agent is not
+  told, because its outbox and account are removed with it.
 - Existing **`!stop`** in an agent room still cancels conversation work, not
   containers. Status and text cancellation/approval/recovery commands remain
   available while draining; new ordinary work is refused, not silently queued.
