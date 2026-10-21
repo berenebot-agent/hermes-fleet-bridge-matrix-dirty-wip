@@ -90,6 +90,7 @@ type Turn struct {
 }
 type Notice struct {
 	ID, Room, Thread, Text string
+	Plain                  bool
 	MenuID                 string
 	EventID                string
 	Reaction               int
@@ -451,12 +452,18 @@ func (s *Store) Update(fn func(*State) error) error {
 	return nil
 }
 func addNotice(m *Member, id, room, thread, text string) {
-	for _, n := range m.Outbox {
-		if n.ID == id {
+	addNoticeFull(m, &Notice{ID: id, Room: room, Thread: thread, Text: text})
+}
+
+// addNoticeFull queues a notice that carries more than plain text, such as a plain-body echo
+// of a voice transcript. The ID still decides whether it is already queued.
+func addNoticeFull(m *Member, n *Notice) {
+	for _, e := range m.Outbox {
+		if e.ID == n.ID {
 			return
 		}
 	}
-	m.Outbox = append(m.Outbox, &Notice{ID: id, Room: room, Thread: thread, Text: text})
+	m.Outbox = append(m.Outbox, n)
 }
 
 // noticeIndex locates a queued reply by ID. The outbox is shared by every room an agent serves,

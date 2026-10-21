@@ -423,10 +423,24 @@ func (e *Engine) prepareMedia(ctx context.Context, id, turn string) error {
 				}
 				return ""
 			}()
+			addVoiceNotice(st.Members[id], v)
 			return nil
 		})
 	}
 	return nil
+}
+
+// voiceNotice is the room-visible echo of what a voice note contributed to the agent's prompt.
+// The human reads it before the agent's answer, so a misheard instruction is obvious.
+func voiceNotice(text string) string {
+	return "🎙️ Transcript sent to the agent:\n" + text
+}
+
+// addVoiceNotice queues that echo in the reply outbox, so it is durable, retried and delivered
+// once, ahead of the agent's own reply. The notice ID is the turn's, which keeps a repeated
+// pass over the same turn from queueing a second echo.
+func addVoiceNotice(m *Member, t *Turn) {
+	addNoticeFull(m, &Notice{ID: t.ID + "-voice", Room: turnRoom(m, t), Thread: t.Thread, Text: voiceNotice(t.Text), Plain: true})
 }
 
 func (e *Engine) outputMedia(m *Member, t *Turn, text string) (string, []*Attachment, error) {

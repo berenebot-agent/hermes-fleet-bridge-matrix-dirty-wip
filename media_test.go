@@ -402,6 +402,36 @@ func TestVoiceTextAndControls(t *testing.T) {
 	}
 }
 
+func TestVoiceTranscriptNotice(t *testing.T) {
+	m := &Member{ID: "iris", Room: "!room:chat.test"}
+	tn := &Turn{ID: "turn-1", Room: "!other:chat.test", Text: "make a report", Media: &Attachment{Kind: "voice", Transcript: "make a report"}}
+	addVoiceNotice(m, tn)
+	if len(m.Outbox) != 1 {
+		t.Fatal("voice transcript was not queued")
+	}
+	n := m.Outbox[0]
+	if n.ID != "turn-1-voice" || n.Room != "!other:chat.test" || n.Thread != "" || !n.Plain {
+		t.Fatalf("unexpected notice %+v", n)
+	}
+	if n.Text != "🎙️ Transcript sent to the agent:\nmake a report" {
+		t.Fatalf("unexpected notice text %q", n.Text)
+	}
+	addVoiceNotice(m, tn)
+	if len(m.Outbox) != 1 {
+		t.Fatal("voice transcript was queued twice")
+	}
+	content := noticeContent("*not emphasis*", true)
+	if _, ok := content["format"]; ok {
+		t.Fatal("plain notice carried a formatted body")
+	}
+	if content["body"] != "*not emphasis*" {
+		t.Fatalf("plain notice body was altered: %v", content["body"])
+	}
+	if body := noticeContent("*emphasis*", false)["formatted_body"]; body != "<i>emphasis</i>" {
+		t.Fatalf("unexpected formatted body %q", body)
+	}
+}
+
 func TestMediaDownloadDoesNotBlockStop(t *testing.T) {
 	var requests atomic.Int32
 	e, s := fakeEngine(t, func(w http.ResponseWriter, r *http.Request) { requests.Add(1); fakeCapabilities(w) })

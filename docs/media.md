@@ -122,6 +122,13 @@ captions never enter the bridge-command dispatcher, even when they start with `!
 Terminal turns scrub their transient prompt/transcript copies from controller
 state, as text-only turns already do. Hermes retains its conversation normally.
 
+Every transcribed voice note is echoed into its room as a plain-text notice
+prefixed with 🎙️, carrying exactly the text the voice message contributed to
+the agent's prompt: the transcript, plus any caption. The notice is queued in
+the reply outbox, so it is durable, retried and delivered once, ahead of the
+agent's own answer. It carries no formatted body, so the transcript is shown
+verbatim. A failed transcription posts only the failure notice.
+
 ## Limits, retention and recovery
 
 - 20 MiB per input/output file; 100 MiB combined input/output per turn.

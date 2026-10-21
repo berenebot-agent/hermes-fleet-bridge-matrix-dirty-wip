@@ -297,7 +297,9 @@ document interpretation depends on the agent's installed tools.
 
 Voice notes carrying the Matrix voice-message marker are transcribed locally in
 English using **Parakeet TDT 0.6B v2 INT8 + sherpa-onnx + FFmpeg**. The saved
-transcript becomes a normal Hermes prompt automatically. No Groq key or cloud
+transcript becomes a normal Hermes prompt automatically. Each voice note is
+echoed back into the room as a 🎙️ plain-text notice showing exactly what was
+sent to the agent, before the agent's own reply. No Groq key or cloud
 speech service is used. An ordinary audio-file upload remains a file, not a spoken
 instruction. Transcripts never execute bridge `!` commands. Speech recognition can
 mishear instructions: use typed messages for exact or high-risk requests.
