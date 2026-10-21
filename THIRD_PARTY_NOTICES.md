@@ -1,8 +1,21 @@
 # Bundled third-party software
 
 The image includes unmodified upstream components. Their copyright and licence
-notices remain with the bundled assets. This controller uses only Go's standard
-library; it does not include third-party Go modules.
+notices remain with the bundled assets. The controller also includes pinned Go
+modules for Matrix E2EE and embedded SQLite. Their licence files and complete
+module/version inventory are shipped under `/opt/element/licenses/go-modules/`.
+Unmodified corresponding module source can be obtained with
+`go mod download -json <module>@<version>` using that inventory (or through the
+source links on `https://pkg.go.dev/<module>@<version>`). Preserve these source
+availability notices when redistributing MPL-covered code.
+
+- mautrix-go 0.31.0, including goolm — MPL-2.0, with inherited Apache-2.0 files:
+  https://github.com/mautrix/go/tree/v0.31.0
+- modernc.org/sqlite 1.38.2 — BSD-3-Clause wrapper and public-domain SQLite:
+  https://pkg.go.dev/modernc.org/sqlite@v1.38.2
+- go.mau.fi/util and other transitive Go modules — their individual notices are
+  included in the generated Go-module licence directory; exact pins are in
+  `go.mod`, `go.sum` and the image's `modules.txt`.
 
 - Tuwunel 1.9.2 — Apache-2.0. Source and notices:
   https://github.com/matrix-construct/tuwunel/tree/v1.9.2

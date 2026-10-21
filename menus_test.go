@@ -232,7 +232,8 @@ func TestMenuDeliveryRetriesAndReactionSync(t *testing.T) {
 		if strings.HasSuffix(r.URL.Path, "/sync") {
 			var filter map[string]any
 			json.Unmarshal([]byte(r.URL.Query().Get("filter")), &filter)
-			if !strings.Contains(string(jsonBytes(filter)), "m.reaction") {
+			timeline := filter["room"].(map[string]any)["timeline"].(map[string]any)
+			if types, filtered := timeline["types"]; filtered && !strings.Contains(string(jsonBytes(types)), "m.reaction") {
 				t.Error("reactions excluded from sync")
 			}
 			replyJSON(w, syncResponse(events, false))

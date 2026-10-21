@@ -1,5 +1,52 @@
 # MVP verification
 
+## Matrix E2EE — 2026-10-21
+
+Supersedes the unencrypted transport and Web encryption-setup module described in
+older entries. See [encryption.md](encryption.md). The approved dependency pins are
+mautrix-go v0.31.0 and modernc SQLite v1.38.2, with goolm for the pure-Go build.
+
+- `gofmt -l .` passed (final formatting gate).
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T114607-go-vet_._...-2759160.log`.
+- `go test -race ./...` passed (24.708s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T114600-go-test_-race_._...-2758840.log`.
+- New real-crypto/local-fake-endpoint coverage: cross-signed bot device bootstrap,
+  separate SQLite stores, Olm key delivery and Megolm text both ways, missing keys
+  persisted across restart, identical encrypted retries after restart/503,
+  encryption/history-visibility state persistence, membership-triggered session
+  rotation, pre-login welcome waiting without exhausting retries,
+  encrypted media upload/download through the actual bridge staging path, wrong-room
+  and forged/replayed input refusal, plaintext downgrade refusal, private file
+  permissions and corrupted-attachment integrity checks.
+- No real provider calls or native phone UI tests were run by this local suite.
+
+### Live deployment checks
+
+- Built the actual CGO-disabled/goolm image successfully, including generated Go
+  dependency notices. Local image manifest:
+  `sha256:31318a77e569fbbd90b33177f9d38ad5810e4a02fd79032e91f1b063e07d1a27`.
+- Stopped the old service; archived only Matrix/controller/secrets to
+  `data/reset-backups/e2ee-20261021T114157Z/`. Preserved fleet directories, templates,
+  Hermes homes and `.env`. Two queued and one held old bridge turns were not
+  resumed. An intermediate pre-login bootstrap was also archived under
+  `data/reset-backups/e2ee-bootstrap-20261021T114740Z/` after the welcome gate fix;
+  it had zero human encryption devices and zero received turns before reset.
+- Fresh bootstrap provisioned eight encrypted rooms (Fleet included) and eight
+  cross-signed bot devices. Queried actual room encryption and device-signature
+  state through the private API without printing any credentials or keys.
+- Restarted the deployed service and confirmed every bot's device keys and
+  cross-signing master identity remained unchanged.
+- Actual health: ready true, zero held turns, zero blocked replies, zero failed
+  agent sync streams. One pre-login welcome remains pending, with zero send attempts
+  consumed and no prematurely generated ciphertext.
+- `https://fleet.bw.bendellar.com/`, `/config.json`,
+  `/.well-known/matrix/client`, `/_matrix/client/versions` and `/healthz` all
+  returned HTTPS 200 after the final restart.
+- Still not exercised: a human completing fresh Element Web/Element X recovery,
+  actual phone voice UI, or a production model-provider turn. This deployment
+  check did not bootstrap or take custody of the human's cryptographic identity.
+
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 

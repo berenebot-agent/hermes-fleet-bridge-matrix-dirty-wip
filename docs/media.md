@@ -3,6 +3,10 @@
 This is a bridge-only extension. It does not install a native Matrix adapter in
 Hermes, modify Hermes, or introduce another Compose service.
 
+**E2EE amendment (2026-10-21):** [encryption.md](encryption.md) adds encrypted
+message envelopes and Matrix v2 encrypted attachments. The transport now uses
+mautrix-go and embedded SQLite; the file confinement and quota rules below remain.
+
 ## Inbound behaviour
 
 - Accept `m.image`, `m.file` and `m.audio` messages. Apply existing room, mention,
@@ -15,7 +19,8 @@ Hermes, modify Hermes, or introduce another Compose service.
   needs a separate browser/mobile acceptance check.
 - Accept local `mxc://<configured-server>/<media-id>` only. Download through the
   private homeserver's authenticated client media endpoint with `allow_remote=false`;
-  refuse redirects, non-MXC URLs and encrypted `file` payloads. Never fetch arbitrary
+  refuse redirects and non-MXC URLs. Accept validated v2 encrypted `file` payloads,
+  verify their ciphertext hash before decrypting/staging. Never fetch arbitrary
   attachment URLs or enable federation.
 - Persist receipt/reference and the sync cursor together. Download to a generated
   temporary name, enforce the actual byte cap, fsync/rename, then persist checksum,

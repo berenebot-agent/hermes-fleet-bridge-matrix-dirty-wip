@@ -2,8 +2,15 @@ FROM ghcr.io/matrix-construct/tuwunel:v1.9.2@sha256:a354976db35cb6e3f8c0b801f266
 FROM vectorim/element-web:v1.12.13@sha256:5107e63026c13ed014f743e485821b7d4b56d275a41e76303859bb14f5f94eb6 AS element
 FROM golang:1.27.2-bookworm@sha256:5cf287a799e6b94384bad13d16b14904c531f51ba65792237e122ce42b392f61 AS build
 WORKDIR /src
-COPY go.mod *.go ./
-RUN GOMEMLIMIT=512MiB GOFLAGS=-p=2 CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /bridge .
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+RUN GOMEMLIMIT=512MiB GOFLAGS=-p=2 CGO_ENABLED=0 go build -tags=goolm -trimpath -ldflags='-s -w' -o /bridge .
+RUN set -eu; mkdir /go-licenses && go list -m -f '{{if .Version}}{{.Path}} {{.Version}}{{end}}' all > /go-licenses/modules.txt && \
+    go list -m -f '{{if .Dir}}{{if .Version}}{{.Path}} {{.Dir}}{{end}}{{end}}' all | while read module dir; do \
+      [ -n "$module" ] || continue; mkdir -p "/go-licenses/$module"; \
+      find "$dir" -maxdepth 1 -type f \( -iname 'license*' -o -iname 'copying*' -o -iname 'notice*' -o -iname 'authors*' \) -exec cp {} "/go-licenses/$module/" \;; \
+    done
 
 FROM docker:29.9.1-cli@sha256:6fae2214c3121a28d5aa639d09032f61310b7c9c75ffbad1025f261a1b621800 AS docker-cli
 
@@ -26,6 +33,7 @@ COPY --from=build /bridge /usr/local/bin/bridge
 COPY THIRD_PARTY_NOTICES.md /opt/THIRD_PARTY_NOTICES.md
 COPY THIRD_PARTY_NOTICES.md /opt/element/licenses/THIRD_PARTY_NOTICES.md
 COPY --from=build /usr/local/go/LICENSE /opt/element/licenses/Go-LICENSE
+COPY --from=build /go-licenses /opt/element/licenses/go-modules
 ADD --chmod=0444 --checksum=sha256:a8ccad6d8ae08bf7d78cebffafb6c5e4e70b35a9fec705a52fd137674e1d1df7 https://raw.githubusercontent.com/matrix-construct/tuwunel/v1.9.2/LICENSE /opt/element/licenses/Tuwunel-LICENSE
 ADD --chmod=0444 --checksum=sha256:5132c7f0475b02c8107a2e0f0363e70423c62d2664ab927e76193226e5e05905 https://raw.githubusercontent.com/element-hq/element-web/v1.12.13/LICENSE-AGPL-3.0 /opt/element/licenses/Element-AGPL-3.0
 ADD --chmod=0444 --checksum=sha256:8b1ba204bb69a0ade2bfcf65ef294a920f6bb361b317dba43c7ef29d96332b9b https://raw.githubusercontent.com/element-hq/element-web/v1.12.13/LICENSE-GPL-3.0 /opt/element/licenses/Element-GPL-3.0

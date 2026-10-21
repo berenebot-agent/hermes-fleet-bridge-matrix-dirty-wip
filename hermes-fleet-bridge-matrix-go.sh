@@ -40,7 +40,7 @@ REPO_ROOT="$SCRIPT_DIR"
 TTY_FLAG=""
 if [ -t 1 ]; then TTY_FLAG="-it"; fi
 
-ENV_FLAGS="-e GOFLAGS=-p=2"
+ENV_FLAGS=(-e "GOFLAGS=-p=2 -tags=goolm")
 # The repo is git-tracked but the toolchain container's user doesn't own it, so
 # build-like commands would fail VCS stamping (exit 128). Disable stamping for
 # those commands only (test/vet/gofmt don't accept the flag).
@@ -77,7 +77,7 @@ if [ "${1:-}" = "gofmt" ]; then
     docker run $TTY_FLAG --rm \
         --memory="$MEM_LIMIT" \
         --memory-swap="$MEM_LIMIT" \
-        $ENV_FLAGS \
+        "${ENV_FLAGS[@]}" \
         -v "$MOD_CACHE:/go/pkg/mod" \
         -v "$BUILD_CACHE:/root/.cache/go-build" \
         -v "$REPO_ROOT:/src" \
@@ -88,7 +88,7 @@ else
     docker run $TTY_FLAG --rm \
         --memory="$MEM_LIMIT" \
         --memory-swap="$MEM_LIMIT" \
-        $ENV_FLAGS \
+        "${ENV_FLAGS[@]}" \
         -v "$MOD_CACHE:/go/pkg/mod" \
         -v "$BUILD_CACHE:/root/.cache/go-build" \
         -v "$REPO_ROOT:/src" \

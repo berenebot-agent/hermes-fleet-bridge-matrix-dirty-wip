@@ -3,7 +3,8 @@
 A single-container Matrix + Element chat service that wakes existing Hermes
 Compose agents, relays text and attachments, transcribes English voice notes
 locally, and stops their
-Compose projects after verified inactivity. Go controller, standard library only.
+Compose projects after verified inactivity. Go controller with mautrix-go E2EE
+and embedded SQLite crypto storage; no additional service.
 
 **MVP implemented.** The bundled homeserver, real Hermes image and Element browser
 login have been exercised using isolated state and local fake inference. This is
@@ -14,7 +15,8 @@ have been configured or tested. See [verification](docs/verification.md).
 
 Give the user one HTTPS URL, a username and a password. They log in to the bundled
 Element Web and see their private agent rooms: no signup, room invitations,
-mentions, tokens, homeserver selection or required device verification.
+mentions, tokens or homeserver selection. Complete Element's normal encryption
+setup, keep the recovery key, and verify new devices when asked.
 
 The user can also create their own spaces and rooms, invite an agent's bot into
 them, and the bot joins, greets the room once, and answers there like any other
@@ -172,11 +174,15 @@ controlled by the bundled Element configuration.
 
 ### Phone and Web verification
 
-For a fresh account, start with Element X and complete device verification if it
-asks. Leave key storage/recovery **off**: no room is encrypted here, so it protects
-nothing, and an incomplete setup is what produces the "key storage out of sync"
-prompt. The bundled Web client already skips its encryption setup screen; Element X
-does not read web configuration. See [client setup](docs/client-setup.md).
+Rooms use **end-to-end encryption**, including text, images, files and voice notes.
+Use Element's stock setup flow: enable key storage, set up recovery, and keep the
+recovery key in your password manager. Verify new Web/phone sessions from an
+existing device or with that key. The bridge no longer suppresses these screens.
+See [client setup](docs/client-setup.md) and [the encryption contract](docs/encryption.md).
+
+Encryption ends at the controller's bot device. Hermes, its history and any model
+provider still receive plaintext. The bridge host is trusted; the homeserver and
+controller currently share that host. E2EE does not protect against its compromise.
 
 ## Commands
 
@@ -312,10 +318,15 @@ an unbridgeable gap fails closed instead of silently dropping messages. That
 fail-closed rule protects the agent's own provisioned room; in a room the operator
 created, a history gap restarts that room's stream instead of wedging every other
 room. State written by an earlier version is upgraded in place on start.
-The current state version is 4; versions 1/2/3 retain their existing session IDs.
-Older controllers refuse version 4 rather than silently ignoring queued media.
+The current state version is 6, including pending ciphertext and encrypted reply
+retry state. Older controllers refuse version 6 rather than losing crypto work.
 Downgrade only with a matching controller/state backup; never edit the version
 number to force a rollback.
+
+Each bot also has a private SQLite crypto database and cryptographic secrets under
+`data/secrets/crypto/<agent>/`. Back up **all of `data/` consistently while stopped**,
+not just the JSON file. Missing crypto keys are not silently regenerated beside
+an existing device. Replies retain their ciphertext across retries and restarts.
 
 Room membership is durable and self-healing: an invitation pending at startup is
 accepted on the next start, because an incrementing sync only offers an invite

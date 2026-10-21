@@ -29,10 +29,11 @@ type Matrix struct {
 	mu         sync.Mutex
 	secrets    Secrets
 	secretPath string
+	crypto     map[string]*matrixCrypto
 }
 
 func newMatrix(c Config) (*Matrix, error) {
-	m := &Matrix{Base: "http://" + c.MatrixListen, c: c, secretPath: filepath.Join(c.Data, "secrets", "accounts.json")}
+	m := &Matrix{Base: "http://" + c.MatrixListen, c: c, secretPath: filepath.Join(c.Data, "secrets", "accounts.json"), crypto: map[string]*matrixCrypto{}}
 	b, e := readPrivate(m.secretPath)
 	if os.IsNotExist(e) {
 		entries, re := os.ReadDir(filepath.Join(c.Data, "matrix"))
@@ -238,6 +239,9 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 		if httpStatus(e, 404) {
 			body := map[string]any{"room_alias_name": "hermes_" + id, "name": id, "preset": "private_chat", "visibility": "private", "invite": []string{admin.User}, "creation_content": map[string]bool{"m.federate": false}, "initial_state": []any{map[string]any{"type": "org.hermes.fleet", "state_key": "", "content": map[string]string{"agent": id, "server": m.c.ServerName}}, map[string]any{"type": "m.room.history_visibility", "state_key": "", "content": map[string]string{"history_visibility": "joined"}}}}
 			body["name"] = agentName(member)
+			if m.crypto != nil {
+				body["initial_state"] = append(body["initial_state"].([]any), map[string]any{"type": "m.room.encryption", "state_key": "", "content": map[string]string{"algorithm": "m.megolm.v1.aes-sha2"}})
+			}
 			e = api(ctx, "POST", m.Base, "/_matrix/client/v3/createRoom", bot.Token, body, &r, nil)
 			if e != nil {
 				return errors.New("private room creation failed; alias is retained for safe reconciliation")
@@ -270,6 +274,14 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 	}
 	if e = m.nameBot(ctx, bot, agentName(member)); e != nil {
 		return e
+	}
+	if m.crypto != nil {
+		if e = m.initCrypto(ctx, id, bot); e != nil {
+			return e
+		}
+		if e = m.ensureEncrypted(ctx, id, r.Room); e != nil {
+			return e
+		}
 	}
 	return s.Update(func(st *State) error {
 		member := st.Members[id]
@@ -329,11 +341,13 @@ func (m *Matrix) grantAdmin(ctx context.Context, room, token, user string) error
 }
 
 type Event struct {
-	ID       string `json:"event_id"`
-	Sender   string `json:"sender"`
-	Type     string `json:"type"`
-	StateKey string `json:"state_key"`
-	Content  struct {
+	Raw       json.RawMessage `json:"-"`
+	Decrypted bool            `json:"-"`
+	ID        string          `json:"event_id"`
+	Sender    string          `json:"sender"`
+	Type      string          `json:"type"`
+	StateKey  string          `json:"state_key"`
+	Content   struct {
 		Body     string          `json:"body"`
 		MsgType  string          `json:"msgtype"`
 		URL      string          `json:"url"`
@@ -363,6 +377,16 @@ type Event struct {
 		} `json:"m.relates_to"`
 	} `json:"content"`
 }
+
+func (ev *Event) UnmarshalJSON(b []byte) error {
+	type plain Event
+	if err := json.Unmarshal(b, (*plain)(ev)); err != nil {
+		return err
+	}
+	ev.Raw = append(ev.Raw[:0], b...)
+	return nil
+}
+
 type Timeline struct {
 	Events  []Event `json:"events"`
 	Limited bool    `json:"limited"`
@@ -433,9 +457,10 @@ func (mx *Matrix) reconcileInvites(ctx context.Context, s *Store, id string) err
 
 // roomScan is one room's processed sync window, applied to the store in a single update.
 type roomScan struct {
-	mention bool
-	space   bool
-	last    string
+	undecryptable []string
+	mention       bool
+	space         bool
+	last          string
 	// intro is the join greeting queued when this agent is first invited into the room. It is
 	// empty for the agent's own provisioned room, which was not joined by invitation.
 	intro string
@@ -672,20 +697,48 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	// One sync stream per agent covers its provisioned room plus every room the bot was invited
 	// to. Timeline entries are capped per room so a full fleet stays inside the response limit,
 	// and no room restriction is set because invites are only visible without one.
-	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]any{"limit": 50, "types": []string{"m.room.message", "m.reaction"}}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
+	filter := string(jsonBytes(map[string]any{"room": map[string]any{"timeline": map[string]any{"limit": 50}, "ephemeral": map[string]any{"types": []string{}}, "state": map[string]any{"lazy_load_members": true}}, "presence": map[string]any{"types": []string{}}, "account_data": map[string]any{"types": []string{}}}))
 	q := url.Values{"timeout": {"25000"}, "filter": {filter}}
 	if m.Since != "" {
 		q.Set("since", m.Since)
 	}
-	var response syncRoomsResponse
-	if e := api(ctx, "GET", mx.Base, "/_matrix/client/v3/sync?"+q.Encode(), bot.Token, nil, &response, nil); e != nil {
+	var raw json.RawMessage
+	if e := api(ctx, "GET", mx.Base, "/_matrix/client/v3/sync?"+q.Encode(), bot.Token, nil, &raw, nil); e != nil {
 		return e
+	}
+	var response syncRoomsResponse
+	if e := json.Unmarshal(raw, &response); e != nil {
+		return errors.New("invalid Matrix sync response")
 	}
 	if response.Next == "" {
 		return errors.New("Matrix sync did not return a cursor")
 	}
 	mx.acceptInvites(ctx, m, bot, response.Rooms.Invite)
+	if e := mx.cryptoSync(ctx, id, raw, m.Since); e != nil {
+		return e
+	}
+	encryptedInbox := append([]EncryptedPending(nil), m.Encrypted...)
+	activeInbox := encryptedInbox[:0]
+	for _, p := range encryptedInbox {
+		if _, left := response.Rooms.Leave[p.Room]; !left {
+			activeInbox = append(activeInbox, p)
+		}
+	}
+	encryptedInbox = activeInbox
+	for _, p := range encryptedInbox {
+		if m.Rooms[p.Room] != nil {
+			if _, left := response.Rooms.Leave[p.Room]; !left {
+				if response.Rooms.Join == nil {
+					response.Rooms.Join = map[string]joinedRoom{}
+				}
+				if _, exists := response.Rooms.Join[p.Room]; !exists {
+					response.Rooms.Join[p.Room] = joinedRoom{}
+				}
+			}
+		}
+	}
 	scans := map[string]*roomScan{}
+	keyRequests := 0
 	for room, joined := range response.Rooms.Join {
 		if m.Controller && room != m.Room {
 			continue
@@ -713,6 +766,14 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			scans[room] = scan
 			continue
 		}
+		if mx.crypto != nil {
+			if err := mx.ensureEncrypted(ctx, id, room); err != nil {
+				if room == m.Room {
+					return err
+				}
+				continue // An operator-created plaintext room must not wedge the encrypted fleet.
+			}
+		}
 		events := joined.Timeline.Events
 		if joined.Timeline.Limited && scan.last != "" {
 			prefix, e := mx.backfill(ctx, bot.Token, room, scan.last, joined.Timeline.Prev)
@@ -732,6 +793,60 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				continue
 			}
 			scan.last = ev.ID
+			if ev.Type == "m.room.encrypted" {
+				found := false
+				for _, p := range encryptedInbox {
+					var old Event
+					_ = json.Unmarshal(p.Raw, &old)
+					if old.ID == ev.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					encryptedInbox = append(encryptedInbox, EncryptedPending{Room: room, Raw: ev.Raw, Received: time.Now().UTC()})
+				}
+			}
+		}
+		// Retry older ciphertext even when this sync has no new timeline entries.
+		var keep []EncryptedPending
+		for _, p := range encryptedInbox {
+			if p.Room != room {
+				keep = append(keep, p)
+				continue
+			}
+			var encrypted Event
+			if json.Unmarshal(p.Raw, &encrypted) != nil {
+				return errors.New("invalid queued ciphertext")
+			}
+			if botSender(encrypted.Sender) {
+				continue
+			}
+			decrypted, err := mx.decryptEvent(ctx, id, room, p.Raw)
+			if err != nil {
+				if keyRequests < 8 && p.KeyRequests < 8 && time.Now().After(p.NextKeyRequest) && missingSession(err) {
+					mx.requestEventKeys(ctx, id, room, p.Raw)
+					keyRequests++
+					p.KeyRequests++
+					p.NextKeyRequest = time.Now().Add(time.Duration(1<<p.KeyRequests) * time.Minute)
+				}
+				if time.Since(p.Received) < 7*24*time.Hour {
+					keep = append(keep, p)
+				} else {
+					scan.undecryptable = append(scan.undecryptable, encrypted.ID)
+				}
+				continue
+			}
+			events = append(events, decrypted)
+		}
+		encryptedInbox = keep
+		for _, ev := range events {
+			if ev.ID == "" {
+				continue
+			}
+			if mx.crypto != nil && ev.Type == "m.room.message" && !ev.Decrypted {
+				continue
+			}
 			if m.Controller && ev.Sender != "@"+mx.c.Admin+":"+mx.c.ServerName {
 				continue
 			}
@@ -791,6 +906,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			scan.turns = append(scan.turns, t)
 		}
 		scans[room] = scan
+	}
+	if len(encryptedInbox) > 1000 || len(jsonBytes(encryptedInbox)) > 16<<20 {
+		return errors.New("encrypted inbox full; sync cursor retained")
 	}
 	return s.Update(func(st *State) error {
 		current := st.Members[id]
@@ -863,6 +981,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			for _, rejected := range scan.rejects {
 				addNotice(current, rejected+"-ambiguous", room, "", "Multiple agents are in this room; address the one you want ("+bot.User+" !menu). An unaddressed !stop still stops every agent here.")
 			}
+			for _, eventID := range scan.undecryptable {
+				addNotice(current, eventID+"-undecryptable", room, "", "An encrypted message could not be decrypted or its sender device could not be trusted within seven days. Nothing was dispatched. Verify your device and resend the message.")
+			}
 		}
 		// A room the bot has left stops being served; a later re-invite starts a fresh
 		// conversation rather than resuming a session nobody can see any more.
@@ -891,6 +1012,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			current.Outbox = kept
 		}
 		current.Since = response.Next
+		current.Encrypted = encryptedInbox
 		prune(current)
 		return nil
 	})
@@ -1008,7 +1130,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	var r struct {
 		ID string `json:"event_id"`
 	}
-	e := api(ctx, "PUT", mx.Base, roomPath(room)+"/send/m.room.message/"+txn, bot.Token, content, &r, nil)
+	e := mx.sendEncrypted(ctx, s, id, room, n, txn, content, &r)
 	if e == nil && r.ID == "" {
 		e = errors.New("Matrix send returned no event ID")
 	}
@@ -1019,6 +1141,10 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 			return nil
 		}
 		v := a.Outbox[i]
+		if errors.Is(e, errNoEncryptionRecipient) {
+			v.Next = time.Now().Add(30 * time.Second)
+			return nil
+		}
 		if e != nil {
 			v.Attempts++
 			v.Next = time.Now().Add(time.Duration(1<<min(v.Attempts, 6)) * time.Second)
@@ -1034,6 +1160,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 			return nil
 		}
 		v.Sent++
+		v.Ciphertext = nil
 		if v.Sent == len(parts) {
 			a.Outbox = append(a.Outbox[:i], a.Outbox[i+1:]...)
 		}

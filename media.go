@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,10 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+
+	"maunium.net/go/mautrix/crypto/attachment"
+	"maunium.net/go/mautrix/event"
+	matrixid "maunium.net/go/mautrix/id"
 )
 
 const maxAttachment = 20 << 20
@@ -34,10 +39,14 @@ type Attachment struct {
 	Transcript                              string
 	Uploaded                                string
 	Index                                   int
+	File                                    *event.EncryptedFileInfo
 }
 
 func validAttachment(a *Attachment, outgoing bool) bool {
 	if len(a.Name) > 240 || len(a.Source) > 2048 || len(a.MIME) > 200 || len(a.Transcript) > 16<<10 || len(a.Uploaded) > 2048 {
+		return false
+	}
+	if a.File != nil && (len(jsonBytes(a.File)) > 4096 || a.File.Version != "v2" || a.File.Key.Algorithm != "A256CTR" || a.File.Key.KeyType != "oct" || (outgoing && string(a.File.URL) != a.Uploaded) || (!outgoing && string(a.File.URL) != a.Source)) {
 		return false
 	}
 	if a.Ready {
@@ -79,7 +88,11 @@ func incomingMedia(ev Event) *Attachment {
 		a.Kind = "voice"
 	}
 	if len(ev.Content.File) > 0 && string(ev.Content.File) != "null" {
-		a.Error = "Encrypted attachments are unsupported."
+		if len(ev.Content.File) > 4096 || json.Unmarshal(ev.Content.File, &a.File) != nil || a.File == nil || a.File.Version != "v2" || a.File.Key.Algorithm != "A256CTR" || a.File.Key.KeyType != "oct" {
+			a.Error = "Invalid encrypted attachment metadata."
+		} else {
+			a.Source = string(a.File.URL)
+		}
 	}
 	if a.Size < 0 || a.Size > maxAttachment {
 		a.Error = "Attachment exceeds the 20 MiB limit or has an invalid size."
@@ -333,7 +346,26 @@ func (e *Engine) prepareMedia(ctx context.Context, id, turn string) error {
 			e.mediaMu.Unlock()
 			return errors.New("Matrix refused the attachment download.")
 		}
-		checksum, n, err := writeMedia(dir, "file", resp.Body, min(int64(maxAttachment), maxAgentMedia-used))
+		limit := min(int64(maxAttachment), maxAgentMedia-used)
+		var source io.Reader = resp.Body
+		if a.File != nil {
+			var data []byte
+			data, err = io.ReadAll(io.LimitReader(resp.Body, limit+1))
+			if err == nil && int64(len(data)) > limit {
+				err = errors.New("encrypted attachment too large")
+			}
+			if err == nil {
+				err = a.File.DecryptInPlace(data)
+			}
+			if err != nil {
+				resp.Body.Close()
+				cancel()
+				e.mediaMu.Unlock()
+				return errors.New("Encrypted attachment failed integrity/size verification.")
+			}
+			source = bytes.NewReader(data)
+		}
+		checksum, n, err := writeMedia(dir, "file", source, limit)
 		resp.Body.Close()
 		cancel()
 		if err != nil {
@@ -525,13 +557,31 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 			if err = verifyMedia(f, a); err != nil {
 				return err
 			}
-			req, err := http.NewRequestWithContext(ctx, "POST", mx.Base+"/_matrix/media/v3/upload?filename="+url.QueryEscape(a.Name), f)
+			var upload io.Reader = f
+			mime := a.MIME
+			var encryptedFile *event.EncryptedFileInfo
+			if mx.crypto != nil {
+				data, err := io.ReadAll(io.LimitReader(f, maxAttachment+1))
+				if err != nil || len(data) > maxAttachment {
+					return errors.New("Cannot read private attachment snapshot.")
+				}
+				key := attachment.NewEncryptedFile()
+				key.EncryptInPlace(data)
+				encryptedFile = &event.EncryptedFileInfo{EncryptedFile: *key}
+				upload = bytes.NewReader(data)
+				mime = "application/octet-stream"
+			}
+			uploadPath := mx.Base + "/_matrix/media/v3/upload"
+			if mx.crypto == nil {
+				uploadPath += "?filename=" + url.QueryEscape(a.Name)
+			}
+			req, err := http.NewRequestWithContext(ctx, "POST", uploadPath, upload)
 			if err != nil {
 				return err
 			}
 			req.ContentLength = a.Size
 			req.Header.Set("Authorization", "Bearer "+bot.Token)
-			req.Header.Set("Content-Type", a.MIME)
+			req.Header.Set("Content-Type", mime)
 			resp, err := apiClient.Do(req)
 			if err != nil {
 				return err
@@ -546,24 +596,36 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 			if _, err = mediaDownloadPath(result.URI, mx.c.ServerName); err != nil {
 				return err
 			}
+			if encryptedFile != nil {
+				encryptedFile.URL = matrixid.ContentURIString(result.URI)
+			}
 			if err = s.Update(func(st *State) error {
 				if i := noticeIndex(st.Members[id], n.ID); i >= 0 {
 					st.Members[id].Outbox[i].Media.Uploaded = result.URI
+					st.Members[id].Outbox[i].Media.File = encryptedFile
 				}
 				return nil
 			}); err != nil {
 				return err
 			}
 			a.Uploaded = result.URI
+			a.File = encryptedFile
 		}
 		content := map[string]any{"msgtype": a.Kind, "body": a.Name, "filename": a.Name, "url": a.Uploaded, "info": map[string]any{"size": a.Size, "mimetype": a.MIME}}
+		if mx.crypto != nil {
+			if a.File == nil {
+				return errors.New("Encrypted upload key missing; refusing plaintext fallback.")
+			}
+			delete(content, "url")
+			content["file"] = a.File
+		}
 		if n.Thread != "" {
 			content["m.relates_to"] = map[string]any{"rel_type": "m.thread", "event_id": n.Thread}
 		}
 		var result struct {
 			ID string `json:"event_id"`
 		}
-		err := api(ctx, "PUT", mx.Base, roomPath(room)+"/send/m.room.message/"+stableID(id, n.ID, "media"), bot.Token, content, &result, nil)
+		err := mx.sendEncrypted(ctx, s, id, room, n, stableID(id, n.ID, "media"), content, &result)
 		if err == nil && result.ID == "" {
 			return errors.New("Matrix returned no attachment event ID.")
 		}
@@ -573,6 +635,10 @@ func (mx *Matrix) sendMedia(ctx context.Context, s *Store, id, room string, n *N
 		m := st.Members[id]
 		i := noticeIndex(m, n.ID)
 		if i < 0 {
+			return nil
+		}
+		if errors.Is(err, errNoEncryptionRecipient) {
+			m.Outbox[i].Next = time.Now().Add(30 * time.Second)
 			return nil
 		}
 		if err != nil {

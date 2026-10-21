@@ -67,19 +67,13 @@ func frontend(c Config, s *Store, ready *atomic.Bool) http.Handler {
 		if p == "/.well-known/matrix/client" {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Access-Control-Allow-Origin", "*")
-			w.Write(jsonBytes(map[string]any{"m.homeserver": map[string]string{"base_url": c.PublicURL}, "io.element.e2ee": map[string]bool{"default": false, "force_disable": true}}))
+			w.Write(jsonBytes(map[string]any{"m.homeserver": map[string]string{"base_url": c.PublicURL}, "io.element.e2ee": map[string]bool{"default": true}}))
 			return
 		}
 		if p == "/config.json" {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Cache-Control", "no-store")
-			w.Write(jsonBytes(map[string]any{"brand": "Hermes Fleet", "default_server_config": map[string]any{"m.homeserver": map[string]string{"base_url": c.PublicURL, "server_name": c.ServerName}}, "disable_custom_urls": true, "disable_guests": true, "disable_registration": true, "force_verification": false, "default_theme": "dark", "show_labs_settings": false, "integrations_ui_url": "", "integrations_rest_url": "", "integrations_widgets_urls": []string{}, "modules": []string{elementModulePath}, "room_directory": map[string]any{"servers": []string{}}, "setting_defaults": map[string]any{"UIFeature.advancedEncryption": false, "UIFeature.identityServer": false}, "mobile_guide_toast": false}))
-			return
-		}
-		if p == elementModulePath {
-			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			w.Write([]byte(elementModule))
+			w.Write(jsonBytes(map[string]any{"brand": "Hermes Fleet", "default_server_config": map[string]any{"m.homeserver": map[string]string{"base_url": c.PublicURL, "server_name": c.ServerName}}, "disable_custom_urls": true, "disable_guests": true, "disable_registration": true, "default_theme": "dark", "show_labs_settings": false, "integrations_ui_url": "", "integrations_rest_url": "", "integrations_widgets_urls": []string{}, "room_directory": map[string]any{"servers": []string{}}, "setting_defaults": map[string]any{"UIFeature.identityServer": false}, "mobile_guide_toast": false}))
 			return
 		}
 		if strings.HasPrefix(p, "/_matrix/") {

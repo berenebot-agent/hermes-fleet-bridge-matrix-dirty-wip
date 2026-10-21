@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const stateVersion = 5
+const stateVersion = 6
 const maxPending = 100
 
 // maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
@@ -52,6 +52,7 @@ type Member struct {
 	DefaultModel, DefaultProvider                  string
 	Turns                                          []*Turn
 	Outbox                                         []*Notice
+	Encrypted                                      []EncryptedPending
 	LastActivity                                   time.Time
 }
 
@@ -97,6 +98,16 @@ type Notice struct {
 	Next                   time.Time
 	Media                  *Attachment
 	TurnID                 string
+	Ciphertext             json.RawMessage `json:",omitempty"`
+}
+
+// Ciphertext is retained before acknowledging sync, including while keys are delayed.
+type EncryptedPending struct {
+	Room           string
+	Raw            json.RawMessage
+	Received       time.Time
+	KeyRequests    int
+	NextKeyRequest time.Time
 }
 
 // stateV1 and memberV1 are the frozen state version 1 on-disk shapes. Never edit them: they
@@ -131,7 +142,7 @@ func loadState(b []byte, out *State) (bool, error) {
 	switch head.Version {
 	case stateVersion:
 		return false, json.Unmarshal(b, out)
-	case 2, 3, 4:
+	case 2, 3, 4, 5:
 		if err := json.Unmarshal(b, out); err != nil {
 			return false, err
 		}
@@ -344,6 +355,17 @@ func openStore(c Config) (*Store, error) {
 				return nil, errors.New("unknown turn phase; refuse unsafe recovery")
 			}
 		}
+		if len(m.Encrypted) > 1000 || len(jsonBytes(m.Encrypted)) > 16<<20 {
+			f.Close()
+			return nil, errors.New("encrypted inbox exceeds safety limit")
+		}
+		for _, p := range m.Encrypted {
+			var ev Event
+			if p.Room == "" || p.Received.IsZero() || p.KeyRequests < 0 || p.KeyRequests > 8 || json.Unmarshal(p.Raw, &ev) != nil || ev.Type != "m.room.encrypted" || ev.ID == "" {
+				f.Close()
+				return nil, errors.New("invalid encrypted inbox; restore a consistent backup")
+			}
+		}
 		for _, n := range m.Outbox {
 			if n == nil || n.ID == "" || n.Sent < 0 || n.Sent >= len(chunks(n.Text)) || n.Reaction < 0 || n.Reaction > 8 {
 				f.Close()
@@ -355,6 +377,15 @@ func openStore(c Config) (*Store, error) {
 			if n.Media != nil && (n.TurnID == "" || !validAttachment(n.Media, true)) {
 				f.Close()
 				return nil, errors.New("invalid attachment outbox; restore a consistent backup")
+			}
+			if len(n.Ciphertext) > 0 {
+				var wire struct {
+					Algorithm string `json:"algorithm"`
+				}
+				if len(n.Ciphertext) > 1<<20 || json.Unmarshal(n.Ciphertext, &wire) != nil || wire.Algorithm != "m.megolm.v1.aes-sha2" {
+					f.Close()
+					return nil, errors.New("invalid encrypted reply state")
+				}
 			}
 		}
 	}

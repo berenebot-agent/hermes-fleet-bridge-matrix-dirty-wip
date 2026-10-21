@@ -2,6 +2,14 @@
 
 **Version:** 0.4 (implemented media extension)
 
+**Encryption amendment (2026-10-21):** The operator approved replacing unencrypted
+V1 transport with Matrix E2EE, mautrix-go and embedded SQLite crypto storage, plus
+a fresh Matrix deployment without preserving old accounts/history.
+[encryption.md](encryption.md) is authoritative wherever older sections below
+describe unencrypted rooms, stdlib-only transport or JSON-only persistence.
+Human verification and recovery now use stock Element flows with key storage on.
+The Web encryption-setup suppression module is removed.
+
 **Date:** 2026-10-19
 **Project:** `hermes-fleet-bridge-matrix-dirty-wip`  
 **Reference implementation:** [Telegram Hermes Fleet Bridge](https://github.com/berenebot-agent/hermes-fleet-bridge-dirty-wip)
@@ -10,7 +18,7 @@
 
 Build a **standalone, self-hosted Matrix chat platform for a fleet of existing Hermes agents**. It replaces Telegram as the chat surface, while carrying forward the existing fleet bridge's primary job: automatically start Hermes containers on a message and stop them when idle.
 
-**User experience:** The end user receives **one HTTPS URL, a username, and a password**. Provisioning handles accounts, rooms and membership. They must **not** need to register, create rooms, accept invitations, change permissions, find bot IDs, type `@mentions`, install plugins or manage access tokens. Bundled Web fixes the homeserver; native clients control their own server selection. Standard account/device verification is accepted, and client key storage/recovery is left disabled because no room is encrypted. Do not suppress verification or claim that unencrypted rooms eliminate account identity requirements. See [client setup](client-setup.md).
+**User experience:** The end user receives **one HTTPS URL, a username, and a password**. Provisioning handles accounts, rooms and membership. They must **not** need to register, create rooms, accept invitations, change permissions, find bot IDs, type `@mentions`, install plugins or manage access tokens. Bundled Web fixes the homeserver; native clients control their own server selection. Complete normal Element account/device verification, enable key storage and save the recovery key. New devices may need verification or recovery. Do not suppress these flows. See [client setup](client-setup.md).
 
 The user is not restricted to what was provisioned: they may create spaces and rooms, invite an agent's bot into them, and the bot joins, greets the room once, and answers there like any other member. In a room the operator created, the bot answers when mentioned by default and can be told otherwise with `!require_mention off`; its own provisioned room never needs a mention. See §5.
 
@@ -36,7 +44,7 @@ One Docker image / one Docker Compose service bundles:
 - Linux host networking: the frontend has one configurable fixed port; the homeserver listener is loopback-only. Agent bridge IPs are inspected locally; host-network members use loopback API ports.
 - No external PostgreSQL, Redis, hosted service, separate Element container, or additional manual Matrix administrator is required.
 - Existing Hermes agent containers and persistent directories remain outside this application.
-- The runtime base is Debian Bookworm, explicitly approved for glibc speech-engine compatibility. The pinned standalone speech artifact currently targets Linux amd64. No additional service, Go module, Python or Node runtime is added.
+- The runtime base is Debian Bookworm, explicitly approved for glibc speech-engine compatibility. The pinned standalone speech artifact currently targets Linux amd64. E2EE adds approved Go modules and embedded SQLite; no additional service, Python or Node runtime is added.
 
 **Message transport decision for initial build:** The always-running bridge controller owns Matrix bot identities and Matrix event consumption. It queues messages and relays them to Hermes through its existing authenticated HTTP run API. **Do not simultaneously enable a Hermes native Matrix client for the same room/bot**, or duplicate consumption/replies may result. This design deliberately avoids depending on a stopped native Matrix adapter to wake and recover the first incoming event.
 
@@ -203,7 +211,7 @@ local-path tools and voice becomes text before the authenticated run API is call
 - Persist media references with event receipt/sync, staged checksums before use,
   transcripts before admission, and private output snapshots before outbox creation.
 - Accept only local homeserver `mxc://` media, authenticated downloads, no redirects,
-  no arbitrary URL fetches, no encrypted attachments, no shell interpolation.
+  no arbitrary URL fetches, authenticated v2 encrypted attachments, no shell interpolation.
 - The member write scope explicitly expands to `data/matrix-media/`; all private
   snapshots/model files remain under the bridge's existing `data/controller/` mount.
 - Bound files to 20 MiB, combined turn media to 100 MiB, outgoing attachments to five,
@@ -278,7 +286,7 @@ Actual Element X tap behavior is a separate acceptance check, not yet verified.
 - Private rooms, minimum necessary Matrix power levels, and each bot scoped to the rooms it was invited to.
 - Room membership is the access boundary: only members of a room the bot has joined can wake that agent, and only an approved human's invitation adds a room. Bot accounts and bot-originated events never wake an agent, so agents cannot loop or be woken by each other. Anyone who can invite the bot into a room chooses where that agent runs, so who may join the operator's rooms is part of the security boundary.
 - HTTPS via external reverse proxy; normal Matrix password authentication, rate limits and no anonymous bootstrap exposure.
-- **No room E2EE in v1**: bots do not manage encryption keys. Client account/device verification remains separate and is supported through normal client flows. Clearly disclose that the homeserver stores room messages in server-readable form.
+- **Room E2EE**: bots persist their own device identities, cross-signing and Olm/Megolm state. Human device verification and recovery use normal Element flows. The bridge/Hermes/provider handle plaintext after decryption; E2EE does not protect against compromise of the shared bridge host. See [encryption.md](encryption.md).
 - Never expose admin passwords, bot tokens, secrets or agent API keys through Element configuration, room messages or logs.
 - Restrict `./data/secrets` permissions; manage credentials without overwriting working credentials on restarts.
 - Docker socket access confers near-host-root privileges. Keep the controller trusted and private; do not expose a raw Docker API or interpolate untrusted room text into shell/Compose arguments.
@@ -333,7 +341,7 @@ deployment check.
 ## 14. MVP implementation limits
 
 - One approved human login; additional human provisioning is not implemented, though any member of a room the bot has joined can use the agent there.
-- Go 1.27.2; standard library only; all local Go tooling runs through the Docker wrapper.
+- Go 1.27.2; standard library plus approved mautrix-go and SQLite dependencies for E2EE; all local Go tooling runs through the Docker wrapper with the `goolm` build tag.
 - Text/root limit 16 KiB; at most 100 pending turns per agent and 100 served rooms per agent; a 50-message per-room sync timeline; UTF-8-safe 12,000-byte reply chunks; 8 MiB remote JSON response bound; 64 MiB controller-state bound; 10,000-event backfill ceiling. Safety-limit failures do not silently acknowledge lost work.
 - Three admission attempts; eight visibility failures before holding; eight failed reply sends before explicit retry. Successful long-running jobs continue polling.
 - Complete authenticated activity counters, including approval waits/process completions/delegations, are required. Unobservable activity never authorizes shutdown.

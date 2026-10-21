@@ -21,7 +21,7 @@ import (
 func homeserverConfig(c Config) error {
 	host, port, _ := net.SplitHostPort(c.MatrixListen)
 	n, _ := strconv.Atoi(port)
-	config := fmt.Sprintf("[global]\nserver_name=%q\ndatabase_path=%q\naddress=[%q]\nport=%d\nregistration_shared_secret_file=%q\nallow_registration=false\nallow_federation=false\nfederate_created_rooms=false\nallow_encryption=false\nallow_public_room_directory_without_auth=false\nlockdown_public_room_directory=true\nnew_user_displayname_suffix=\"\"\ndb_cache_capacity_mb=32.0\ndb_write_buffer_capacity_mb=16.0\ncache_capacity_modifier=0.1\nlog=\"error\"\nlog_colors=false\n", c.ServerName, filepath.Join(c.Data, "matrix"), host, n, filepath.Join(c.Data, "secrets", "registration"))
+	config := fmt.Sprintf("[global]\nserver_name=%q\ndatabase_path=%q\naddress=[%q]\nport=%d\nregistration_shared_secret_file=%q\nallow_registration=false\nallow_federation=false\nfederate_created_rooms=false\nallow_encryption=true\nallow_public_room_directory_without_auth=false\nlockdown_public_room_directory=true\nnew_user_displayname_suffix=\"\"\ndb_cache_capacity_mb=32.0\ndb_write_buffer_capacity_mb=16.0\ncache_capacity_modifier=0.1\nlog=\"error\"\nlog_colors=false\n", c.ServerName, filepath.Join(c.Data, "matrix"), host, n, filepath.Join(c.Data, "secrets", "registration"))
 	return atomicFile(filepath.Join(c.Data, "secrets", "tuwunel.toml"), []byte(config))
 }
 func run(ctx context.Context) error {
@@ -41,6 +41,7 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	defer mx.closeCrypto()
 	d := newDocker()
 	startup, stopStartup := context.WithTimeout(ctx, 2*time.Minute)
 	err = reconcileFleet(startup, c, s, mx, d)
