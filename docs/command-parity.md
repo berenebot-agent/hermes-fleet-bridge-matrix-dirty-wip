@@ -25,6 +25,7 @@ commit.
 | `GET /api/sessions`, `/{id}`, `/{id}/messages` | Session inventory, cumulative counters, the recorded transcript |
 | `POST /api/sessions`, `PATCH /{id}`, `POST /{id}/fork`, `POST /{id}/chat`, `POST /{id}/model` | Session create/retitle/fork/chat/model lock |
 | `POST /v1/runs`, `GET /v1/runs/{id}`, `POST /v1/runs/{id}/stop`, `/steer`, `/approval` | Run submission, status, cancellation, steering, approvals |
+| `GET /v1/runs/{id}/events` | Server-sent run lifecycle events: tool calls, output deltas, reasoning, completion |
 | `GET /api/jobs`, `GET /v1/toolsets` | Background jobs, tool inventory |
 | Gateway control socket (`<member home>/gateway.sock`) | `identify`, `status`, `pause-for-update` (Hermes' own drain-and-restart), `reload-plugins`, profile verbs |
 

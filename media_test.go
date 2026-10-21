@@ -495,6 +495,8 @@ func TestVoiceTurnUsesTextAPIAndQueuesOutputFile(t *testing.T) {
 			replyJSON(w, map[string]string{"run_id": "voice-run"})
 		case "/v1/runs/voice-run":
 			replyJSON(w, map[string]string{"run_id": "voice-run", "status": "completed", "output": "MATRIX_FILE: report.txt"})
+		case "/v1/runs/voice-run/events":
+			w.WriteHeader(404)
 		default:
 			t.Errorf("unexpected Hermes API path %s", r.URL.Path)
 			w.WriteHeader(404)
@@ -534,6 +536,8 @@ func TestStoppedMediaRunStillReconcilesAfterRestart(t *testing.T) {
 			replyJSON(w, map[string]any{})
 		case "/v1/runs/existing":
 			replyJSON(w, map[string]string{"run_id": "existing", "status": "cancelled"})
+		case "/v1/runs/existing/events":
+			w.WriteHeader(404)
 		default:
 			t.Error("unexpected admission or endpoint")
 			w.WriteHeader(400)

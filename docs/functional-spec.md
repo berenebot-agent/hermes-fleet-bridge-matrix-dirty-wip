@@ -172,7 +172,8 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 5. Wait for authenticated Hermes API readiness, subject to a startup timeout.
 6. Create the Hermes run with a stable session and idempotency key where available.
 7. Relay room-level typing and approval/status notices; send the final text answer and explicitly selected output attachments to the originating room/thread. A text reply is sent as `org.matrix.custom.html` formatted markdown so Element renders bold and code instead of showing literal `**`, with the plain markdown `body` retained as the fallback. Token streaming is not part of this MVP.
-8. Persist run and reply progress; acknowledge successful completion logically once.
+8. Relay each tool call of a running turn to the originating room/thread as one short summary line naming the tool and the argument preview the agent produced. The call's output is never relayed. Summaries precede the final answer and are capped per turn; `!tools off` hides them for one agent/room.
+9. Persist run and reply progress; acknowledge successful completion logically once.
 
 **Container lifecycle notices:**
 
@@ -249,6 +250,7 @@ Prioritize and test:
 | `!usage` | Verified cumulative session counters, separately labelled as not context occupancy; may wake Hermes |
 | `!approve <request-id>`, `!deny <request-id>` | This originating room/thread/session/run/exact request only; approve once or deny, never blanket grants |
 | `!require_mention on\|off` | Reply mode in additional rooms; dedicated room fixed to Always responds. Persisted per agent/room, commands/menu reactions exempt except an unaddressed command in a room shared by several fleet bots, which is refused with a pointer to the intended agent (`!stop` stays global) |
+| `!tools on\|off` | Show or hide the agent's tool-call summary lines in this room: one short line per tool call naming the tool and its argument preview, never the call's output. Shown by default, persisted per agent/room, capped per turn, never wakes Hermes |
 | Background tasks | Only activity observable through the Hermes API contributes to idle safety; no arbitrary job-administration UI |
 
 **Mandatory feasibility gate:** Check the *actual Hermes HTTP API* for model selection, context inspection, cancellation, and approvals; do not assume Hermes native Matrix adapter features are automatically available to an API-based bridge. Unsupported commands must explain the limitation, not fake success. Model, context and stop are high-priority integration acceptance items.

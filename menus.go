@@ -242,6 +242,11 @@ func (e *Engine) menuCommand(ctx context.Context, id, turn string) bool {
 			if len(fields) == 2 {
 				value = fields[1]
 			}
+		case "!tools":
+			action = "tool-summaries"
+			if len(fields) == 2 {
+				value = fields[1]
+			}
 		case "!context":
 			action = "context"
 		}
@@ -328,6 +333,17 @@ func (e *Engine) menuCommand(ctx context.Context, id, turn string) bool {
 					reply = "Mentions are now required in this room. Commands and menu reactions still work without one."
 				} else {
 					reply = "Mentions are no longer required in this room: every eligible message is dispatched to this agent."
+				}
+			}
+		case "tool-summaries":
+			if value != "on" && value != "off" {
+				reply = "Usage: !tools on|off."
+			} else {
+				r.HideTools = value == "off"
+				if r.HideTools {
+					reply = "Tool call summaries are now hidden in this room."
+				} else {
+					reply = "Tool call summaries are now shown in this room."
 				}
 			}
 		case "conversations":

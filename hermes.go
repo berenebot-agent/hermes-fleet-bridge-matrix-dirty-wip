@@ -352,6 +352,13 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 			return
 		}
 	}
+	// Mirror the run's tool calls into the room as one summary line each. The
+	// stream is advisory: if it cannot be opened, the turn still finishes.
+	m = e.s.View().Members[id]
+	t = findTurn(m, turn)
+	toolCtx, stopTools := context.WithCancel(ctx)
+	defer stopTools()
+	toolsDone := e.attachToolStream(toolCtx, id, turn, endpoint, t.RunID, t.ToolSeq)
 	failures := 0
 	lastTyping := time.Time{}
 	for ctx.Err() == nil {
@@ -398,6 +405,12 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 				}
 				if r.Status == "cancelled" {
 					text = "Hermes confirmed the run stopped. Completed tool actions were not undone."
+				}
+				// The tool stream ends with the run, so waiting for it lets the last
+				// summary lines reach the room before the answer does.
+				select {
+				case <-toolsDone:
+				case <-time.After(toolSummaryWait):
 				}
 				_ = e.s.Update(func(st *State) error {
 					member := st.Members[id]
@@ -873,6 +886,7 @@ const helpText = `Hermes fleet commands (send as plain text):
 !discard <turn-id> — release an uncertain turn only after confirmed inactivity; resend explicitly if desired
 !resend — retry blocked Matrix replies (a visible duplicate remains possible)
 !require_mention on|off — reply mode in additional rooms; dedicated room always responds
+!tools on|off — show or hide the agent's tool-call summary lines in this room
 !restart — administrator only: restart this agent's Hermes gateway
 
 Use the main room: new thread prompts are unsupported. New/Resume changes future Hermes history, not the visible Matrix history. Global model scope affects only this agent's bridge-managed chats/default, not Hermes global settings. Tools/filesystem are shared. No E2EE: the server can read messages.`

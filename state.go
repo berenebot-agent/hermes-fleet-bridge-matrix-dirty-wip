@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const stateVersion = 6
+const stateVersion = 7
 const maxPending = 100
 
 // maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
@@ -65,6 +65,8 @@ type Room struct {
 	Space     bool
 	Selected  string
 	Revision  uint64
+	// HideTools suppresses the agent's tool-call summaries in this room.
+	HideTools bool
 }
 type Session struct {
 	ID, Model, Provider string
@@ -87,6 +89,12 @@ type Turn struct {
 	Media                                            *Attachment
 	Completed                                        time.Time
 	MediaCleaned                                     bool
+	// ToolSeq is the next run-event sequence this turn expects. It resumes the
+	// Hermes event stream after a controller restart without repeating a line.
+	ToolSeq int
+	// ToolLines counts the tool summaries already queued for this turn, so the
+	// per-turn cap holds across a reconnect.
+	ToolLines int
 }
 type Notice struct {
 	ID, Room, Thread, Text string
@@ -143,7 +151,7 @@ func loadState(b []byte, out *State) (bool, error) {
 	switch head.Version {
 	case stateVersion:
 		return false, json.Unmarshal(b, out)
-	case 2, 3, 4, 5:
+	case 2, 3, 4, 5, 6:
 		if err := json.Unmarshal(b, out); err != nil {
 			return false, err
 		}

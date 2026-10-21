@@ -265,6 +265,16 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
   Hermes. An agent invited into a room says so once, in a greeting that names the
   room and this command; the greeting comes from the durable reply outbox, so it is
   delivered exactly once and never repeats after a restart.
+- `!tools on|off` — whether this room sees the agent's **tool-call summaries**:
+  one short line per tool call, naming the tool and the argument preview the
+  agent produced (`🔧 terminal: ls -la /data`). The call's **output is never
+  shown** — only the tool name and its argument preview. Summaries are shown by
+  default in every room, per agent/room, survive restarts, and never wake Hermes.
+  A turn adds at most 10 summaries and then states that further calls are not
+  shown. The summaries are queued ahead of the agent's answer, so the room reads
+  as a running trace followed by the result. Because the reply outbox drains one
+  message per second, a burst of tool calls can push the answer back a few
+  seconds.
 
 Reaction menus target **Element X on mobile and bundled Element Web on desktop**;
 actual Element X tapping remains an acceptance check, not a verified deployment
@@ -332,8 +342,9 @@ an unbridgeable gap fails closed instead of silently dropping messages. That
 fail-closed rule protects the agent's own provisioned room; in a room the operator
 created, a history gap restarts that room's stream instead of wedging every other
 room. State written by an earlier version is upgraded in place on start.
-The current state version is 6, including pending ciphertext and encrypted reply
-retry state. Older controllers refuse version 6 rather than losing crypto work.
+The current state version is 7, including pending ciphertext and encrypted reply
+retry state, and the per-room tool-summary setting. Older controllers refuse
+version 7 rather than losing crypto work or silently dropping a room's setting.
 Downgrade only with a matching controller/state backup; never edit the version
 number to force a rollback.
 

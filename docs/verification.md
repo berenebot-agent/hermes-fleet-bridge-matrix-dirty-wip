@@ -1,5 +1,39 @@
 # MVP verification
 
+## Tool-call summaries — 2026-10-22
+
+The bridge now relays each tool call of a running turn into the originating
+room/thread as one short line naming the tool and the argument preview the agent
+produced (`🔧 terminal: ls -la /data`). The call's **output is never relayed**:
+only `tool.started` frames are read from the Hermes run event stream, and the
+output-bearing `tool.completed` frame is ignored. `!tools on|off` hides or shows
+the summaries for one agent/room; the state version moved to 7 so an older
+controller cannot silently drop that setting.
+
+- `gofmt -l .` passed (final formatting gate).
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T161409-go-vet_._...-3352333.log`.
+- `go test -race -count=1 ./...` passed (31.233s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T161603-go-test_-race_-count=1_._...-3358040.log`.
+- New fake-endpoint coverage: the summary lines precede the agent's answer and
+  carry only the tool name and argument preview; an output delta never reaches
+  the room; a room with summaries hidden gets the answer alone; the per-turn cap
+  states that further calls are not shown; `!tools off`, `!tools on` and bare
+  `!tools` set the room's setting and report their usage.
+- The summaries ride the same durable reply outbox as the answer, so they are
+  ordered, retried and encrypted like any other reply, and a bridge restart
+  resumes the stream from the persisted sequence instead of repeating a line.
+- The answer waits for the event stream to drain (bounded at two seconds), so a
+  tool call still in flight when the run finishes reaches the room before the
+  answer rather than after it.
+- The event stream is advisory: a gateway that does not serve
+  `GET /v1/runs/{id}/events` simply yields no summaries and the turn still
+  completes normally.
+- **Not run for this change:** the real-provider, real-image and browser checks
+  below. The Hermes run event stream itself was verified by reading the
+  deployed template's `gateway/platforms/api_server_runs.py`, including the
+  `tool.started` payload fields and the `Last-Event-ID` resume contract.
+
 ## Deleted-agent Matrix room purge — 2026-10-21
 
 `!fleet delete` now erases the deleted agent's own Matrix room instead of
