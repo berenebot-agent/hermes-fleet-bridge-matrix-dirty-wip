@@ -175,8 +175,8 @@ controlled by the bundled Element configuration.
 For a fresh account, start with Element X and complete device verification if it
 asks. Leave key storage/recovery **off**: no room is encrypted here, so it protects
 nothing, and an incomplete setup is what produces the "key storage out of sync"
-prompt. Then verify the Web login from the trusted phone. Account verification does
-not enable encryption in agent rooms. See [client setup](docs/client-setup.md).
+prompt. The bundled Web client already skips its encryption setup screen; Element X
+does not read web configuration. See [client setup](docs/client-setup.md).
 
 ## Commands
 

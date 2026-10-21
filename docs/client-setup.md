@@ -33,7 +33,32 @@ Allow key storage** off. The client then marks backups explicitly disabled
 which stops later logins from re-enabling them automatically. Restart the app
 afterwards so the settings screen re-reads the server state.
 
+## Bundled Web skips the encryption setup screen
+
+Element Web shows **Confirm your identity** after login whenever the account has
+cross-signing keys. This deployment keeps every room unencrypted, so there is no
+encrypted history for that step to protect.
+
+The bridge therefore serves a small Element module (`element_module.go`) and
+lists it in `/config.json`'s `modules` array. At startup the module registers a
+`cryptoSetup` extension reporting `SHOW_ENCRYPTION_SETUP_UI: false`, and Element's
+`postLoginSetup` then goes straight to the room list.
+
+Element's default leaves that flag `undefined`, and the client tests
+`0 == SHOW_ENCRYPTION_SETUP_UI`, which is false for `undefined` — a real boolean
+`false` is what makes the check pass.
+
+This is a UI suppression, not a crypto fix: device verification, cross-signing and
+key storage remain available in Settings and keep whatever state the clients gave
+them. If a future Element build removes the internal registration hook the module
+uses, it logs a warning and Element falls back to its stock behaviour — the prompt
+returns, nothing else breaks.
+
+Element X is unaffected: it ignores `config.json` entirely and forces
+cross-signing and backups on its own.
+
 ## "Your key storage is currently out of sync"
+
 
 This appears when secret storage is enabled but is missing one of the cross-signing
 secrets (`m.cross_signing.master`, `self_signing`, `user_signing`). Re-entering a
