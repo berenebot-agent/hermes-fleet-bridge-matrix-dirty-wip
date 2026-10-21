@@ -488,9 +488,12 @@ func explicitlyMentioned(ev Event, user string) bool {
 // agent name at the beginning of a message. Bare display names require either an
 // actual Matrix mention or a colon/comma address ("Iris: !menu"), so ordinary
 // prose beginning with "Iris" is not accidentally turned into a command.
-func leadingAddress(text, user string, explicit bool) (string, bool) {
+func leadingAddress(text, user, name string, explicit bool) (string, bool) {
 	local := localUser(user)
 	display := strings.TrimPrefix(local, "agent_")
+	if name == "" {
+		name = display
+	}
 	prefixes := []struct {
 		value       string
 		bareDisplay bool
@@ -498,8 +501,8 @@ func leadingAddress(text, user string, explicit bool) (string, bool) {
 		{user, false},
 		{"@" + local, false},
 		{local, false},
-		{"@" + display, false},
-		{display, true},
+		{"@" + name, false},
+		{name, true},
 	}
 	leading := strings.TrimLeft(text, " \t")
 	for _, prefix := range prefixes {
@@ -534,11 +537,11 @@ func leadingAddress(text, user string, explicit bool) (string, bool) {
 
 // mentioned honours both Matrix mention metadata and the operator-facing agent
 // name. The legacy internal-ID substring fallback remains for existing clients.
-func mentioned(ev Event, bot Credential) bool {
+func mentioned(ev Event, bot Credential, name string) bool {
 	if explicitlyMentioned(ev, bot.User) {
 		return true
 	}
-	if _, ok := leadingAddress(ev.Content.Body, bot.User, false); ok {
+	if _, ok := leadingAddress(ev.Content.Body, bot.User, name, false); ok {
 		return true
 	}
 	la := localUser(bot.User)
@@ -548,24 +551,24 @@ func mentioned(ev Event, bot Credential) bool {
 // stripMention strips supported leading addresses before command detection and
 // before passing a normal prompt to Hermes. Element may render a mention using
 // the display name alone while recording the bot's ID in m.mentions.
-func stripMention(text string, bot Credential, ev Event) string {
-	if rest, ok := leadingAddress(text, bot.User, explicitlyMentioned(ev, bot.User)); ok {
+func stripMention(text string, bot Credential, ev Event, name string) string {
+	if rest, ok := leadingAddress(text, bot.User, name, explicitlyMentioned(ev, bot.User)); ok {
 		return rest
 	}
 	return text
 }
 
 // addressedElsewhere prevents one agent responding to a message visibly
-// addressed to another fleet member. Display-name routing uses known agent IDs;
+// addressed to another fleet member. Display-name routing uses persisted names;
 // internal bot ID addressing is still recognised for other bot namespaces.
 func addressedElsewhere(ev Event, bot Credential, st State) bool {
 	if parts := strings.SplitN(bot.User, ":", 2); len(parts) == 2 {
-		for id := range st.Members {
+		for id, member := range st.Members {
 			other := "@agent_" + id + ":" + parts[1]
 			if other == bot.User {
 				continue
 			}
-			if _, ok := leadingAddress(ev.Content.Body, other, explicitlyMentioned(ev, other)); ok {
+			if _, ok := leadingAddress(ev.Content.Body, other, agentName(member), explicitlyMentioned(ev, other)); ok {
 				return true
 			}
 		}
@@ -752,7 +755,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 					text = text[pos+2:]
 				}
 			}
-			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot, ev), Phase: "queued", Created: time.Now().UTC()}
+			t := &Turn{ID: ev.ID, Room: room, Thread: thread, Sender: ev.Sender, Text: stripMention(text, bot, ev, agentName(m)), Phase: "queued", Created: time.Now().UTC()}
 			if mediaMessage(ev.Content.MsgType) {
 				t.Media = incomingMedia(ev)
 				// With filename present, body is a caption; otherwise it is the display filename.
@@ -775,14 +778,14 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			// share the room, so refuse it with a pointer rather than acting in every bot at
 			// once. !stop stays global; a single-bot room and the agent's own provisioned room
 			// never need a mention.
-			if t.Kind == "command" && room != m.Room && !mentioned(ev, bot) &&
+			if t.Kind == "command" && room != m.Room && !mentioned(ev, bot, agentName(m)) &&
 				strings.Fields(t.Text)[0] != "!stop" && otherBots(view, id, room) {
 				scan.rejects = append(scan.rejects, t.ID)
 				continue
 			}
 			// In a room the operator created the bot behaves like any other member and answers
 			// when addressed; in its own room a mention is never required.
-			if t.Kind == "" && scan.mention && !mentioned(ev, bot) {
+			if t.Kind == "" && scan.mention && !mentioned(ev, bot, agentName(m)) {
 				continue
 			}
 			scan.turns = append(scan.turns, t)

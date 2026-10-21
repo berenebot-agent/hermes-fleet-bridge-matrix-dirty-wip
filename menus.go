@@ -114,7 +114,7 @@ func postMenu(m *Member, id, room, owner, title string, options []MenuOption, re
 func homeMenu(m *Member, t *Turn) {
 	room := turnRoom(m, t)
 	s := getSession(m, room, "")
-	title := "Agent controls · " + m.ID + "\nConversation: " + conversationTitle(s)
+	title := "Agent controls · " + agentName(m) + "\nConversation: " + conversationTitle(s)
 	if s.Model != "" {
 		title += "\nModel: " + s.Model
 		if s.Provider != "" {

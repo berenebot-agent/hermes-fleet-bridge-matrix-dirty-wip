@@ -79,20 +79,24 @@ Fleet
 ├── Agents (paginated)
 │   └── Selected agent
 │       ├── Refresh status
-│       ├── Start
-│       ├── Shutdown
-│       ├── Pause / Enable
+│       ├── Rename agent
+│       ├── More · Lifecycle
+│       │   ├── Start
+│       │   ├── Shutdown
+│       │   ├── Pause / Enable
+│       │   ├── Delete
+│       │   └── Back to agent
 │       ├── Copy agent
 │       ├── Save as template
-│       ├── Delete
 │       └── Back
 ├── Templates (paginated; Clean or Full snapshot)
 │   └── Selected template → creation command example
 └── Help
 ```
 
-All agent actions are top-level; there is no More submenu. Copy, Save as template
-and the template list **ask for the new name**: the bridge posts
+Refresh status, Rename, Copy and Save as template stay on the agent screen.
+Start, Shutdown, Pause/Enable and Delete live under **More · Lifecycle**.
+Rename, Copy, Save as template and the template list **ask for the new name**: the bridge posts
 
 ```text
 Copy purple-shirt-1 → reply with the new agent name.
@@ -122,6 +126,7 @@ Commands:
 !fleet create nova from basic
 !fleet copy iris to nova
 !fleet save-template iris as iris-snapshot
+!fleet rename iris to nova
 !fleet delete iris
 !fleet cancel
 !fleet retry
@@ -150,6 +155,29 @@ Once stopping/copying/deleting begins, cancellation is refused. An approval wait
 held turn, or nonzero/incomplete authenticated activity counters can keep it
 waiting indefinitely: resolve those deliberately. There is no automatic force
 kill. Fix a held operation's reported problem locally, then use `!fleet retry`.
+
+## Rename an agent
+
+Select **Rename agent**, reply with the new name, or send
+`!fleet rename iris to nova`. Names use the same lowercase, up-to-40-character
+format as creation. Names used by another live or deleted identity are refused
+for renaming; choose another name rather than confusing retained history.
+
+Rename changes the agent's Fleet label, Matrix bot display name and **dedicated
+room name**. Additional shared rooms keep their names. Internal identity, bot
+account ID, room ID/alias, messages, conversations, API key, Compose project and
+agent directory all stay unchanged. No container stop/start or draining is needed;
+the current running/stopped and paused/available state is preserved. The saved name
+survives bridge restarts. Future typed Fleet commands and shared-room display-name
+addresses use the new name; the immutable Matrix account handle still works.
+
+Rename is recorded durably before either Matrix request. Profile and room updates
+are not atomic: if one fails, their visible names can temporarily differ. The Fleet
+room reports the held operation; use `!fleet retry` to finish it. Restart retains
+the operation, and the bridge label changes only when both updates succeed.
+Rename cannot be cancelled once queued, does not block agent chat, and does not
+overwrite either source or destination directories. An older controller cannot
+resume a pending rename; finish it before downgrading.
 
 ## Clean and full-snapshot templates
 
@@ -331,11 +359,13 @@ an agent must not grant Docker or filesystem-deletion authority. Remote enrolmen
 Matrix-history cleanup, template editing UI and guided creation wizards are not
 implemented.
 
-Tests use fake Compose, Docker, Matrix and Hermes endpoints. They cover flat
+Tests use fake Compose, Docker, Matrix and Hermes endpoints. They cover grouped
 menus, operator/room restrictions, confirmation expiry, drain/health safety,
 pause persistence, credential separation, clean/full creation, snapshot retries,
 publication and deletion crash recovery, name reuse, storage/mount boundaries,
 and the name prompt: copy, create-from-template, invalid-name recovery, expiry,
 cancellation, refusal while a confirmation is pending, and plain text being
-admitted only while a prompt is pending. They do not operate on a real fleet,
+admitted only while a prompt is pending. Rename coverage includes partial Matrix
+failure/retry, durable recovery, restart reconciliation, name collisions,
+permissions and shared-room addressing. They do not operate on a real fleet,
 provider or homeserver.

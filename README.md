@@ -115,7 +115,8 @@ controlled by the bundled Element configuration.
    Never add individual agent mounts beneath the parent mounts. Existing
    installations must migrate paths/state while stopped; see [Fleet setup](docs/fleet.md).
 
-   The directory basename is the stable agent identity and room name. Basenames
+   The directory basename is the initial agent identity and room name. Managed
+   Fleet renaming changes the display/room names, not that identity or directory. Basenames
    must be unique lowercase localparts (`a-z`, digits, `_`, `.`, `-`); duplicate
    Compose project names are rejected. Use `HERMES_OVERRIDES` only when needed:
    `service`, `project`, `network` (Docker network name), and `port`.
@@ -309,9 +310,12 @@ limit stops the controller rather than acknowledging data it cannot persist.
 
 Default **[Fleet management](docs/fleet.md)** adds a private operator-only room
 for start/shutdown/pause/enable, clean-template creation, full copies, saved full
-snapshot templates and exact-name-confirmed permanent deletion. All agent actions
-are on one menu, with no More submenu. It uses managed parent-directory mounts
-in the main Compose file; existing deployments are not silently migrated.
+snapshot templates, display/room renaming and exact-name-confirmed permanent deletion.
+The agent menu keeps Refresh status, Rename, Copy and Save as template top-level;
+More · Lifecycle contains Start, Shutdown, Pause/Enable and Delete.
+Renaming never moves the agent directory or restarts its containers.
+It uses managed parent-directory mounts in the main Compose file; existing
+deployments are not silently migrated.
 Matrix history is retained when an agent is deleted.
 
 Without Fleet management, recreate the service after editing membership/mounts. Adding an agent provisions

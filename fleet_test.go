@@ -191,7 +191,7 @@ func completeFleetTestOperation(t *testing.T, e *Engine, ctx context.Context) {
 	}
 }
 
-func TestFleetAgentMenuIsFlatAndIdentityBound(t *testing.T) {
+func TestFleetAgentMenuGroupingAndIdentityBinding(t *testing.T) {
 	e, ctx, _, _ := fleetFixture(t)
 	id := fleetTestCommand(t, e, ctx, "!fleet")
 	m := e.s.View().Members[fleetID]
@@ -204,16 +204,221 @@ func TestFleetAgentMenuIsFlatAndIdentityBound(t *testing.T) {
 		return nil
 	})
 	menu := e.s.View().Members[fleetID].Menus["flat-fleet-menu"]
-	if len(menu.Options) != 8 {
-		t.Fatal("agent actions not all on one menu")
+	want := []string{"status", promptRename, "more", promptCopy, promptTemplate, "home"}
+	if len(menu.Options) != len(want) {
+		t.Fatal("unexpected agent menu size")
 	}
-	for _, o := range menu.Options {
-		if strings.Contains(o.Label, "More") || o.Key == "" {
-			t.Fatal("nested or unusable action")
+	for i, o := range menu.Options {
+		if o.Action != want[i] || o.Key == "" {
+			t.Fatal("unexpected or unusable action")
 		}
 		if o.Action != "home" && o.Value != "iris" {
 			t.Fatal("action not bound to agent identity")
 		}
+	}
+	fleetTap(t, e, ctx, "agent", "iris", "more", "iris")
+	for _, m := range e.s.View().Members[fleetID].Menus {
+		if m.Used {
+			continue
+		}
+		want := []string{"start", "shutdown", "pause", "delete", "agent"}
+		if len(m.Options) != len(want) {
+			t.Fatal("unexpected More menu size")
+		}
+		for i, o := range m.Options {
+			if o.Action != want[i] || o.Value != "iris" {
+				t.Fatal("More action missing or not identity-bound")
+			}
+		}
+	}
+	fleetTap(t, e, ctx, "more", "iris", "agent", "iris")
+	_ = e.s.Update(func(st *State) error { st.Members["iris"].Paused = true; return nil })
+	fleetTap(t, e, ctx, "more", "iris", "enable", "iris")
+	if e.s.View().Members["iris"].Paused {
+		t.Fatal("More did not retain Enable")
+	}
+}
+
+func TestFleetRenamePromptRetryAndReconcile(t *testing.T) {
+	e, ctx, _, log := fleetFixture(t)
+	before := e.s.View().Members["iris"]
+	key := e.mx.key("iris")
+	var profile, room atomic.Value
+	profile.Store("iris")
+	room.Store("iris")
+	var failRoom atomic.Bool
+	failRoom.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer private-bot-token" {
+			t.Error("rename did not use the existing bot account")
+		}
+		switch r.URL.Path {
+		case "/_matrix/client/v3/profile/@agent_iris:chat.test/displayname":
+			if r.Method == "GET" {
+				replyJSON(w, map[string]any{"displayname": profile.Load()})
+				return
+			}
+			var body struct {
+				DisplayName string `json:"displayname"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil {
+				t.Error("invalid profile body")
+			}
+			profile.Store(body.DisplayName)
+		case "/_matrix/client/v3/rooms/!iris:chat.test/state/m.room.name/":
+			if failRoom.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			var body struct {
+				Name string `json:"name"`
+			}
+			if json.NewDecoder(r.Body).Decode(&body) != nil || r.Method != "PUT" {
+				t.Error("invalid room update")
+			}
+			room.Store(body.Name)
+		default:
+			t.Errorf("unexpected rename request: %s", r.URL.Path)
+		}
+		replyJSON(w, map[string]any{})
+	}))
+	t.Cleanup(server.Close)
+	e.mx.Base = server.URL
+	fleetTap(t, e, ctx, "agent", "iris", promptRename, "iris")
+	if p := e.s.View().FleetPrompt; p == nil || p.Action != promptRename || p.Source != "iris" {
+		t.Fatal("Rename did not open an identity-bound prompt")
+	}
+	fleetTestText(t, e, ctx, "Not A Name")
+	if e.s.View().FleetPrompt == nil || e.s.View().FleetOperation != nil {
+		t.Fatal("invalid name did not preserve the prompt")
+	}
+	fleetTestText(t, e, ctx, "nova")
+	e.fleetStep(ctx)
+	view := e.s.View()
+	if view.FleetOperation == nil || view.FleetOperation.Error == "" || view.Members["iris"].Draining || view.Members["iris"].Name != "iris" {
+		t.Fatal("partial rename was not held without stopping the agent")
+	}
+	if profile.Load() != "nova" || room.Load() != "iris" {
+		t.Fatal("partial failure was not exercised")
+	}
+	var restored State
+	b, err := os.ReadFile(e.s.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadState(b, &restored); err != nil || !validFleetOperation(restored.FleetOperation, restored) {
+		t.Fatal("pending rename cannot recover from persisted state")
+	}
+	_ = e.s.Update(func(st *State) error { *st = restored; return nil })
+	failRoom.Store(false)
+	fleetTestCommand(t, e, ctx, "!fleet retry")
+	completeFleetTestOperation(t, e, ctx)
+	if profile.Load() != "nova" || room.Load() != "nova" || e.s.View().Members["iris"].Name != "nova" {
+		t.Fatal("retry did not finish both display names")
+	}
+	if err := reconcileFleet(ctx, e.c, e.s, e.mx, e.docker); err != nil {
+		t.Fatal(err)
+	}
+	after := e.s.View().Members["iris"]
+	if after.Name != "nova" || after.ID != before.ID || after.Dir != before.Dir || after.Home != before.Home || after.Project != before.Project || after.Room != before.Room || after.Since != before.Since || e.mx.key("iris") != key {
+		t.Fatal("rename reverted or changed operational identity")
+	}
+	if b, _ := os.ReadFile(log); strings.Contains(string(b), " down ") || strings.Contains(string(b), " up ") {
+		t.Fatal("display rename changed container lifecycle")
+	}
+	fleetTestCommand(t, e, ctx, "!fleet rename nova to lyra")
+	completeFleetTestOperation(t, e, ctx)
+	if e.s.View().Members["iris"].Name != "lyra" || room.Load() != "lyra" {
+		t.Fatal("typed rename did not resolve the new display name")
+	}
+}
+
+func TestFleetRenameRejectsConflictsAndPendingWork(t *testing.T) {
+	for _, name := range []string{"bad/name", "other", "retired", "other-id", fleetID} {
+		t.Run(name, func(t *testing.T) {
+			e, ctx, _, _ := fleetFixture(t)
+			_ = e.s.Update(func(st *State) error {
+				st.Members["other-id"] = &Member{ID: "other-id", Name: "other", Managed: true}
+				st.Members["retired-id"] = &Member{ID: "retired-id", Name: "retired", Managed: true, Deleted: true}
+				return nil
+			})
+			fleetTestCommand(t, e, ctx, "!fleet rename iris to "+name)
+			if e.s.View().FleetOperation != nil || e.s.View().Members["iris"].Name != "iris" {
+				t.Fatal("unsafe rename accepted")
+			}
+		})
+	}
+	e, ctx, _, _ := fleetFixture(t)
+	fleetTap(t, e, ctx, "agent", "iris", promptRename, "iris")
+	fleetTestCommand(t, e, ctx, "!fleet pause iris")
+	fleetTestText(t, e, ctx, "nova")
+	if e.s.View().FleetOperation.Action != "pause" {
+		t.Fatal("name prompt replaced an existing operation")
+	}
+	fleetTestCommand(t, e, ctx, "!fleet cancel")
+	fleetTestCommand(t, e, ctx, "!fleet delete iris")
+	fleetTestCommand(t, e, ctx, "!fleet rename iris to nova")
+	if e.s.View().FleetOperation != nil || e.s.View().FleetConfirmation == nil {
+		t.Fatal("rename bypassed a pending deletion confirmation")
+	}
+}
+
+func TestRenamedAgentAddressing(t *testing.T) {
+	bot := Credential{User: "@agent_iris:chat.test"}
+	other := Credential{User: "@agent_lyra:chat.test"}
+	st := State{Members: map[string]*Member{"iris": {ID: "iris", Name: "nova"}, "lyra": {ID: "lyra"}}}
+	for _, text := range []string{"nova: !menu", "@nova !menu", "nova !menu"} {
+		ev := Event{}
+		ev.Content.Body = text
+		if text == "nova !menu" {
+			ev.Content.Mentions.UserIDs = []string{bot.User}
+		}
+		if !mentioned(ev, bot, "nova") || stripMention(text, bot, ev, "nova") != "!menu" || addressedElsewhere(ev, bot, st) || !addressedElsewhere(ev, other, st) {
+			t.Fatalf("renamed address routed incorrectly: %q", text)
+		}
+	}
+	ev := Event{}
+	ev.Content.Body = "nova has a question"
+	if mentioned(ev, bot, "nova") || addressedElsewhere(ev, other, st) {
+		t.Fatal("ordinary prose was treated as an address")
+	}
+	ev.Content.Body = "iris: !menu"
+	if mentioned(ev, bot, "nova") || addressedElsewhere(ev, other, st) {
+		t.Fatal("old display name remained an address after rename")
+	}
+	ev.Content.Body = "@agent_iris:chat.test !menu"
+	if !mentioned(ev, bot, "nova") || stripMention(ev.Content.Body, bot, ev, "nova") != "!menu" {
+		t.Fatal("immutable Matrix account address stopped working")
+	}
+}
+
+func TestFleetRenamePermissionAndPromptExpiry(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	for i, turn := range []*Turn{
+		{Sender: "@other:chat.test", Room: "!fleet:chat.test"},
+		{Sender: "@admin:chat.test", Room: "!iris:chat.test"},
+		{Sender: "@admin:chat.test", Room: "!fleet:chat.test", Thread: "$thread"},
+	} {
+		turn.ID, turn.Kind, turn.Phase, turn.Text = strconv.Itoa(i), "command", "queued", "!fleet rename iris to nova"
+		_ = e.s.Update(func(st *State) error {
+			st.Members[fleetID].Turns = append(st.Members[fleetID].Turns, turn)
+			return nil
+		})
+		e.fleetCommand(ctx, turn.ID)
+		if e.s.View().FleetOperation != nil {
+			t.Fatal("rename accepted outside operator's Fleet timeline")
+		}
+	}
+	fleetTap(t, e, ctx, "agent", "iris", promptRename, "iris")
+	_ = e.s.Update(func(st *State) error { st.FleetPrompt.Expires = time.Now().Add(-time.Second); return nil })
+	fleetTestText(t, e, ctx, "nova")
+	if e.s.View().FleetPrompt != nil || e.s.View().FleetOperation != nil {
+		t.Fatal("expired rename prompt accepted")
+	}
+	fleetTap(t, e, ctx, "agent", "iris", promptRename, "iris")
+	fleetTestCommand(t, e, ctx, "!fleet cancel")
+	if e.s.View().FleetPrompt != nil {
+		t.Fatal("rename prompt did not cancel")
 	}
 }
 

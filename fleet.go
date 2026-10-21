@@ -21,6 +21,7 @@ const (
 	promptCopy     = "prompt-copy"
 	promptTemplate = "prompt-template"
 	promptCreate   = "prompt-create"
+	promptRename   = "prompt-rename"
 )
 
 var errDeactivationUnavailable = errors.New("Matrix account deactivation unconfirmed")
@@ -101,6 +102,12 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 	}
 	projects := map[string]bool{}
 	ports := map[int]bool{}
+	names := map[string]string{}
+	for id, m := range view.Members {
+		if m.Managed && !m.Deleted {
+			names[agentName(m)] = id
+		}
+	}
 	for dir, id := range dirs {
 		if id == fleetID {
 			return errors.New("fleet-controller is reserved for the Fleet room")
@@ -118,6 +125,13 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 			return fmt.Errorf("agent %s: %w", filepath.Base(dir), err)
 		}
 		m.ID, m.Name, m.Managed = id, filepath.Base(dir), true
+		if old != nil && old.Name != "" {
+			m.Name = old.Name
+		}
+		if other := names[m.Name]; other != "" && other != id {
+			return errors.New("managed agent display name is already in use")
+		}
+		names[m.Name] = id
 		if err = d.validateManaged(ctx, c, m); err != nil {
 			return err
 		}
@@ -176,12 +190,14 @@ const fleetHelp = `Fleet controls (operator only, in this room):
 !fleet create <name> from <template>
 !fleet copy <agent> to <name>
 !fleet save-template <agent> as <template>
+!fleet rename <agent> to <name>
 !fleet delete <agent>
 !fleet cancel — cancel a waiting operation, confirmation or name prompt
 !fleet retry — retry a held operation after fixing the reported problem
 
-Copy agent, Save as template and the template list ask for the new name: reply with
+Rename agent, Copy agent, Save as template and the template list ask for the new name: reply with
 just the name. An invalid name keeps the prompt alive; !fleet cancel ends it.
+Rename changes the bot display name and dedicated room name, not directories, containers or history.
 
 Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Copies and agents created from templates start ready to receive work. Delete permanently erases agent files, not Matrix history, templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
 
@@ -212,7 +228,7 @@ func fleetMenu(st *State, t *Turn, action, value, extra string) {
 		sort.Slice(options, func(i, j int) bool { return options[i].Label < options[j].Label })
 		title += " · " + action
 		options = pageOptions(options, page, action, "")
-	case "agent":
+	case "agent", "more":
 		a := st.Members[value]
 		if a == nil || !a.Managed || a.Deleted {
 			fleetReply(st, t, "Agent is no longer available.")
@@ -225,12 +241,20 @@ func fleetMenu(st *State, t *Turn, action, value, extra string) {
 		}
 		options = []MenuOption{
 			{Label: "Refresh status", Action: "status", Value: value},
-			{Label: "Start", Action: "start", Value: value},
-			{Label: "Shutdown", Action: "shutdown", Value: value}, availability,
+			{Label: "Rename agent", Action: promptRename, Value: value},
+			{Label: "More · Lifecycle", Action: "more", Value: value},
 			{Label: "Copy agent", Action: promptCopy, Value: value},
 			{Label: "Save as template", Action: promptTemplate, Value: value},
-			{Label: "Delete", Action: "delete", Value: value},
 			{Label: "Back", Action: "home"},
+		}
+		if action == "more" {
+			title = "Lifecycle · " + agentName(a) + " · " + fleetAvailability(a)
+			options = []MenuOption{
+				{Label: "Start", Action: "start", Value: value},
+				{Label: "Shutdown", Action: "shutdown", Value: value}, availability,
+				{Label: "Delete", Action: "delete", Value: value},
+				{Label: "Back to agent", Action: "agent", Value: value},
+			}
 		}
 	case "template":
 		tpl, err := readFleetTemplate(extra, value)
@@ -298,8 +322,8 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 		if len(f) > 2 {
 			value = f[2]
 		}
-		if action == "create" || action == "copy" || action == "save-template" {
-			separator := map[string]string{"create": "from", "copy": "to", "save-template": "as"}[action]
+		if action == "create" || action == "copy" || action == "save-template" || action == "rename" {
+			separator := map[string]string{"create": "from", "copy": "to", "save-template": "as", "rename": "to"}[action]
 			if len(f) != 5 || f[3] != separator {
 				action = "help"
 			} else {
@@ -317,9 +341,12 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 	}
 	if action == "status" {
 		view := e.s.View()
-		a := view.Members[value]
+		a := fleetMember(view, value)
+		if t.Selection != nil {
+			a = view.Members[value]
+		}
 		if a == nil {
-			a = fleetMember(view, value)
+			a = view.Members[value]
 		}
 		text := "Agent not found."
 		if a != nil && a.Managed && !a.Deleted {
@@ -338,7 +365,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 	_ = e.s.Update(func(st *State) error {
 		t := findTurn(st.Members[fleetID], turn)
 		switch action {
-		case "home", "agents", "templates", "agent", "template":
+		case "home", "agents", "templates", "agent", "template", "more":
 			fleetMenu(st, t, action, value, e.c.TemplateDir)
 			return nil
 		case "help":
@@ -356,7 +383,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			}
 			fleetReply(st, t, text+"\nFull copy, including private data and provider credentials. Source work drains before a stopped snapshot.")
 			return nil
-		case promptCopy, promptTemplate:
+		case promptCopy, promptTemplate, promptRename:
 			a := st.Members[value]
 			if a == nil || a.Deleted || !a.Managed {
 				fleetReply(st, t, "Agent is no longer available.")
@@ -364,6 +391,8 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			}
 			if action == promptCopy {
 				fleetStartPrompt(st, t, promptCopy, a.ID, "Copy "+agentName(a)+" → reply with the new agent name.", "!fleet copy "+agentName(a)+" to <new-name>")
+			} else if action == promptRename {
+				fleetStartPrompt(st, t, promptRename, a.ID, "Rename "+agentName(a)+" → reply with the new agent name.", "!fleet rename "+agentName(a)+" to <new-name>")
 			} else {
 				fleetStartPrompt(st, t, promptTemplate, a.ID, "Save "+agentName(a)+" as a template → reply with the template name.", "!fleet save-template "+agentName(a)+" as <template-name>")
 			}
@@ -431,11 +460,14 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			e.fleetBeginNamed(st, t, "create", name, nil, value)
 			return nil
 		}
-		a := st.Members[value]
-		if a == nil || a.Deleted || !a.Managed {
-			a = fleetMember(*st, value)
+		a := fleetMember(*st, value)
+		if t.Selection != nil {
+			a = st.Members[value]
 		}
-		if a == nil {
+		if a == nil || a.Deleted || !a.Managed {
+			a = st.Members[value]
+		}
+		if a == nil || a.Deleted || !a.Managed || a.Controller {
 			fleetReply(st, t, "Managed agent not found. Use !fleet agents.")
 			return nil
 		}
@@ -454,7 +486,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 				return nil
 			}
 			startFleetOperation(st, t, action, a.ID, "", "", 0)
-		case "copy", "save-template":
+		case "copy", "save-template", "rename":
 			e.fleetBeginNamed(st, t, action, "", a, name)
 		default:
 			fleetReply(st, t, fleetHelp)
@@ -502,14 +534,18 @@ func (e *Engine) fleetPromptAnswer(turn string) {
 				return nil
 			}
 			e.fleetBeginNamed(st, t, "copy", "", a, name)
-		case promptTemplate:
+		case promptTemplate, promptRename:
 			a := st.Members[p.Source]
 			if a == nil || a.Deleted || !a.Managed {
 				st.FleetPrompt = nil
 				fleetReply(st, t, "Source agent is no longer available.")
 				return nil
 			}
-			e.fleetBeginNamed(st, t, "save-template", "", a, name)
+			action := "save-template"
+			if p.Action == promptRename {
+				action = "rename"
+			}
+			e.fleetBeginNamed(st, t, action, "", a, name)
 		case promptCreate:
 			e.fleetBeginNamed(st, t, "create", p.Source, nil, name)
 		default:
@@ -524,11 +560,25 @@ func (e *Engine) fleetPromptAnswer(turn string) {
 // typed command and the name prompt share it, so both behave identically. A
 // rejected name leaves any pending prompt alive so the operator can retry.
 func (e *Engine) fleetBeginNamed(st *State, t *Turn, action, template string, a *Member, name string) {
+	if st.FleetOperation != nil || st.FleetConfirmation != nil {
+		fleetReply(st, t, "Finish or cancel the pending fleet operation or confirmation first (!fleet cancel).")
+		return
+	}
 	if !fleetName(name) {
 		fleetReply(st, t, "Not a valid agent name. Use up to 40 lowercase letters, digits, dots, dashes or underscores. Reply again, or !fleet cancel.")
 		return
 	}
 	switch action {
+	case "rename":
+		for id, other := range st.Members {
+			if id != a.ID && (agentName(other) == name || id == name) {
+				fleetReply(st, t, "Name is already in use or belongs to a retained identity. Choose another name.")
+				return
+			}
+		}
+		st.FleetPrompt = nil
+		st.FleetOperation = &FleetOperation{ID: t.ID, Action: "rename", Source: a.ID, Name: name, Stage: "renaming"}
+		fleetReply(st, t, "Rename queued: "+agentName(a)+" → "+name+". Only the bot display name and dedicated room name change; the agent keeps running.")
 	case "create":
 		if fleetMember(*st, name) != nil {
 			fleetReply(st, t, "Agent name is already in use.")
@@ -616,7 +666,11 @@ func (e *Engine) fleetStep(ctx context.Context) {
 			if current := st.FleetOperation; current != nil && current.ID == op.ID {
 				current.Error = err.Error()
 				m := st.Members[fleetID]
-				addNotice(m, op.ID+"-error-"+stableID(err.Error())[:8], m.Room, "", "Fleet operation held: "+err.Error()+" Fix the problem locally, then !fleet retry. Source remains guarded; no force-stop or rollback of tool effects.")
+				text := "Fleet operation held: " + err.Error() + " Fix the problem locally, then !fleet retry."
+				if op.Action != "rename" {
+					text += " Source remains guarded; no force-stop or rollback of tool effects."
+				}
+				addNotice(m, op.ID+"-error-"+stableID(err.Error())[:8], m.Room, "", text)
 			}
 			return nil
 		})
@@ -642,6 +696,17 @@ func (e *Engine) fleetStage(op *FleetOperation, stage string) error {
 func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) error {
 	if !validFleetOperation(op, e.s.View()) {
 		return errors.New("invalid fleet operation; refusing unsafe recovery")
+	}
+	if op.Action == "rename" {
+		a := e.s.View().Members[op.Source]
+		bot := e.mx.cred("agent_" + a.ID)
+		if err := e.mx.nameBot(ctx, bot, op.Name); err != nil {
+			return errors.New("bot display-name update failed; retry to complete the rename")
+		}
+		if err := api(ctx, "PUT", e.mx.Base, roomPath(a.Room)+"/state/m.room.name/", bot.Token, map[string]string{"name": op.Name}, nil, nil); err != nil {
+			return errors.New("room-name update failed; bot name may already have changed; retry to complete the rename")
+		}
+		return e.finishFleet(op, "")
 	}
 	var a *Member
 	if op.Action != "create" {
@@ -778,15 +843,19 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 }
 
 func validFleetOperation(op *FleetOperation, st State) bool {
-	if op.ID == "" {
+	if op.ID == "" || (op.Stage == "renaming" && op.Action != "rename") {
 		return false
 	}
 	switch op.Stage {
-	case "waiting", "stopping", "copying", "provisioning", "deleting":
+	case "waiting", "stopping", "copying", "provisioning", "deleting", "renaming":
 	default:
 		return false
 	}
 	switch op.Action {
+	case "rename":
+		if op.Stage != "renaming" || !fleetName(op.Name) {
+			return false
+		}
 	case "create":
 		return (op.Stage == "waiting" || op.Stage == "copying" || op.Stage == "provisioning") && fleetName(op.Source) && fleetName(op.Name) && localpart.MatchString(op.Target) && op.Port >= 1024 && op.Port <= 65535
 	case "copy", "save-template":
@@ -819,6 +888,9 @@ func (e *Engine) finishFleet(op *FleetOperation, warning string) error {
 			return errors.New("fleet operation changed")
 		}
 		if a := st.Members[op.Source]; a != nil && op.Action != "create" {
+			if op.Action == "rename" {
+				a.Name = op.Name
+			}
 			a.Draining = false
 			if op.Action == "start" || ((op.Action == "copy" || op.Action == "save-template") && op.WasRunning) {
 				a.LastActivity = time.Now().UTC()
