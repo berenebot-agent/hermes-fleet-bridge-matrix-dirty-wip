@@ -1207,6 +1207,59 @@ func TestMentionPolicyAndSpaceContainers(t *testing.T) {
 	}
 }
 
+// A room holding only this bot and one other human is a direct conversation: the agent answers
+// every message there without a mention. A room with a second person, or another agent's bot,
+// keeps the mention requirement, and each room's greeting states its own reply mode.
+func TestDirectRoomAnswersWithoutMention(t *testing.T) {
+	c, s := testStore(t)
+	dm, duo, bots := "!dm:chat.test", "!duo:chat.test", "!bots:chat.test"
+	members := map[string][]string{
+		dm:   {"@agent_iris:chat.test", "@admin:chat.test"},
+		duo:  {"@agent_iris:chat.test", "@admin:chat.test", "@other:chat.test"},
+		bots: {"@agent_iris:chat.test", "@admin:chat.test", "@agent_zed:chat.test"},
+	}
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/members") {
+			room := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/_matrix/client/v3/rooms/"), "/members")
+			chunk := []any{}
+			for _, u := range members[room] {
+				chunk = append(chunk, map[string]any{"type": "m.room.member", "state_key": u, "content": map[string]string{"membership": "join"}})
+			}
+			replyJSON(w, map[string]any{"chunk": chunk})
+			return
+		}
+		replyJSON(w, syncRooms(map[string]any{
+			"!iris:chat.test": map[string]any{"timeline": map[string]any{"events": []any{message("$own", "@admin:chat.test", "own room", "")}}},
+			dm:                map[string]any{"timeline": map[string]any{"events": []any{message("$dm", "@admin:chat.test", "just us two", "")}}},
+			duo:               map[string]any{"timeline": map[string]any{"events": []any{message("$duo", "@admin:chat.test", "team talk", "")}}},
+			bots:              map[string]any{"timeline": map[string]any{"events": []any{message("$bots", "@admin:chat.test", "agents talking", "")}}},
+		}))
+	})
+	if err := mx.syncOnce(context.Background(), s, "iris"); err != nil {
+		t.Fatal(err)
+	}
+	m := s.View().Members["iris"]
+	if got := findTurn(m, "$dm"); got == nil || got.Room != dm {
+		t.Fatalf("direct room did not dispatch an unaddressed message: %+v", got)
+	}
+	if findTurn(m, "$duo") != nil || findTurn(m, "$bots") != nil {
+		t.Fatal("mention policy ignored in a room with more than one other member")
+	}
+	if m.Rooms[dm].Mention || !m.Rooms[duo].Mention || !m.Rooms[bots].Mention {
+		t.Fatalf("wrong persisted reply mode: %+v", m.Rooms)
+	}
+	greetings := map[string]string{}
+	for _, n := range m.Outbox {
+		greetings[n.Room] = n.Text
+	}
+	if !strings.Contains(greetings[dm], "answer every message") {
+		t.Fatalf("direct room greeting does not state its reply mode: %q", greetings[dm])
+	}
+	if !strings.Contains(greetings[duo], "only when mentioned") {
+		t.Fatalf("group room greeting does not state its reply mode: %q", greetings[duo])
+	}
+}
+
 // A bare command in a room several fleet bots share is refused with a pointer instead of acting
 // in every bot at once; an addressed command, !stop, a single-bot room and the agent's own
 // provisioned room are unaffected.

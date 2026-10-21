@@ -657,6 +657,27 @@ func (mx *Matrix) roomMeta(ctx context.Context, token, room string, state []Even
 	return roomLabel(name), space, nil
 }
 
+// roomIsDirect reports whether a room holds only this bot and one other human member: a direct
+// conversation, where requiring a mention would be ceremony. Another agent's bot in the room
+// disqualifies it, so two agents never answer every message there. Fails closed: an unreadable
+// member list leaves the room mention-required.
+func (mx *Matrix) roomIsDirect(ctx context.Context, token, bot, room string) bool {
+	var response struct {
+		Chunk []Event `json:"chunk"`
+	}
+	if e := api(ctx, "GET", mx.Base, roomPath(room)+"/members", token, nil, &response, nil); e != nil {
+		return false
+	}
+	others := []string{}
+	for _, m := range response.Chunk {
+		if m.Content.Membership != "join" || m.StateKey == bot {
+			continue
+		}
+		others = append(others, m.StateKey)
+	}
+	return len(others) == 1 && !botSender(others[0])
+}
+
 // roomLabel renders a room name for the join intro: a single line, length-bounded, or "this
 // room" when the room has no usable name. Room names are untrusted input.
 func roomLabel(name string) string {
@@ -678,6 +699,12 @@ func roomLabel(name string) string {
 // operator created starts mention-only.
 func joinIntro(room string) string {
 	return "Happy to join " + room + ". Reply mode: only when mentioned — send !require_mention off here if you would rather I answer every eligible message. !menu shows the controls."
+}
+
+// joinIntroDirect greets a direct conversation, where the agent answers every message: a mention
+// would only be ceremony, and the greeting says how to ask for one anyway.
+func joinIntroDirect(room string) string {
+	return "Happy to join " + room + ". It's just the two of us here, so I answer every message — send !require_mention on here if you would rather I answer only when mentioned. !menu shows the controls."
 }
 
 func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
@@ -755,7 +782,15 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			// The invite acceptance step is the only place a greeting is posted: the agent's own
 			// room was not joined by invitation, and a space is not a conversation.
 			if room != m.Room && !space {
-				scan.intro = joinIntro(label)
+				// A room holding only this bot and one other human is a direct conversation, so
+				// the agent answers every message there and no mention is required. The default
+				// is decided once, when the room is first tracked; the user can change it.
+				if mx.roomIsDirect(ctx, bot.Token, bot.User, room) {
+					scan.mention = false
+					scan.intro = joinIntroDirect(label)
+				} else {
+					scan.intro = joinIntro(label)
+				}
 			}
 		}
 		if room == m.Room {

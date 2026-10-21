@@ -1,5 +1,27 @@
 # MVP verification
 
+## Direct-conversation reply mode — 2026-10-21
+
+An invited room that holds only the agent's bot and one other human member is a
+direct conversation: the agent answers every message there, with no mention
+required. Every other invited room keeps the mention requirement, and the mode
+is decided once, when the room is first tracked.
+
+- `gofmt -l .` passed (final formatting gate).
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T121635-go-vet_._...-2835746.log`.
+- `go test -race -count=1 ./...` passed (21.555s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T121700-go-test_-race_-count=1_._...-2836900.log`.
+- New fake-endpoint coverage: a room whose member list is the bot plus one human
+  dispatches an unaddressed message and persists "every eligible message"; a room
+  with a second human, and a room holding another agent's bot, keep the mention
+  requirement; each room's greeting states its own reply mode.
+- The member list is read once per newly tracked room, never per sync, and an
+  unreadable list fails closed to mention-required.
+- **Not run for this change:** real-provider runs, live deployment checks and
+  Element rendering of the new greeting. Rooms tracked before this build keep the
+  mode they already had; `!require_mention on|off` still changes any room.
+
 ## Matrix E2EE — 2026-10-21
 
 Supersedes the unencrypted transport and Web encryption-setup module described in

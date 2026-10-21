@@ -24,11 +24,23 @@ stale blocking questions for the next implementer.
 - Mention policy is per agent/room, set from chat with `!require_mention on|off` or
   the Reply mode reaction menu: never
   required in the agent's provisioned room, required by default in rooms the user
-  created. Per-agent configuration was rejected as more surface for the same result.
-- An agent invited into a room posts one greeting: it names the room, says it replies
-  only when mentioned, and gives `!require_mention off` as the way to change that. It
-  is queued through the durable reply outbox when the room is first tracked, so it is
-  delivered exactly once, cannot repeat after a restart, and a space or a room the
+  created — except a room holding only that agent's bot and one other human, which
+  is a direct conversation and starts without a mention requirement. Per-agent
+  configuration was rejected as more surface for the same result.
+- The direct-conversation default is read once, when the room is first tracked, from
+  the homeserver's member list: exactly one other joined member, and a human rather
+  than another agent's bot, so two agents never answer every message in one room. It
+  is decided once rather than re-checked, because a mention requirement that silently
+  changes under the user mid-conversation is worse than one that stays; a member
+  joining later leaves the mode alone, and `!require_mention on` restores the
+  requirement. An unreadable member list fails closed to mention-required. The
+  member list is read once per newly tracked room, not per sync, matching the
+  existing "no extra homeserver call" rule for shared-room detection.
+- An agent invited into a room posts one greeting: it names the room, says which
+  reply mode that room has — only when mentioned, or every message in a direct
+  conversation — and gives the command that changes it. It is queued through the
+  durable reply outbox when the room is first tracked, so it
+  is delivered exactly once, cannot repeat after a restart, and a space or a room the
   operator already had gets none. Room names are untrusted, so the label is one line,
   bounded and free of control characters, and only ever appears in that message.
 - Each bot is named after its agent (`purple-shirt-3`, not `agent_purple-shirt-3`) and

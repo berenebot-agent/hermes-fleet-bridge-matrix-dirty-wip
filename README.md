@@ -20,8 +20,8 @@ setup, keep the recovery key, and verify new devices when asked.
 
 The user can also create their own spaces and rooms, invite an agent's bot into
 them, and the bot joins, greets the room once, and answers there like any other
-member. The greeting names the room, states that the agent replies only when
-mentioned, and gives the command that changes it:
+member. The greeting names the room, states that room's reply mode, and gives
+the command that changes it:
 
 > Happy to join Finance2. Reply mode: only when mentioned — send
 > `!require_mention off` here if you would rather I answer every eligible message.
@@ -29,12 +29,22 @@ mentioned, and gives the command that changes it:
 
 In a room the user created the agent answers when mentioned by default;
 `!require_mention off` in that room makes it answer everything, and
-`!require_mention on` restores the mention requirement. The agent's own
-provisioned room never needs a mention, and a space is joined but never answered
-in. Invitations from other agents' bots are refused, so agents cannot wake each
-other, and each bot is named after its agent so Element's mention picker shows
-`Finance2`'s agent rather than an internal `agent_` localpart. See
-[the functional spec](docs/functional-spec.md) §5 for the access-model details.
+`!require_mention on` restores the mention requirement. A room holding only the
+agent and one other human is a direct conversation, so there the agent answers
+every message from the start and no mention is needed:
+
+> Happy to join Finance2. It's just the two of us here, so I answer every message —
+> send `!require_mention on` here if you would rather I answer only when
+> mentioned. `!menu` shows the controls.
+
+That default is decided once, when the agent joins the room: a room that also
+holds another agent's bot is not a direct conversation, and someone joining later
+does not change the mode. The agent's own provisioned room never needs a mention,
+and a space is joined but never answered in. Invitations from other agents' bots
+are refused, so agents cannot wake each other, and each bot is named after its
+agent so Element's mention picker shows `Finance2`'s agent rather than an internal
+`agent_` localpart. See [the functional spec](docs/functional-spec.md) §5 for the
+access-model details.
 
 Ordinary messages use the selected conversation in that room. `!new` starts fresh
 without deleting the previous conversation; `!resume` offers a paginated list of
@@ -246,9 +256,11 @@ Use **plain text `!` commands**, which Element does not intercept as slash comma
 - `!require_mention on|off` — whether this room must mention the agent before it
   answers in an additional room. The menu labels this **Reply mode**: Only when
   mentioned / Every eligible message. The dedicated room is fixed to Always
-  responds. Policy is per agent/room, survives restarts and conversation switches,
-  and never bypasses existing sender/bot checks. Commands and valid menu reactions
-  are mention-exempt, except that a command in a room shared by several fleet bots
+  responds. A room that holds only the agent and one other human starts in Every
+  eligible message mode; every other room starts in Only when mentioned. Policy
+  is per agent/room, survives restarts and conversation switches, and never
+  bypasses existing sender/bot checks. Commands and valid menu reactions are
+  mention-exempt, except that a command in a room shared by several fleet bots
   must address the intended agent (`!stop` stays global). Changing it does not wake
   Hermes. An agent invited into a room says so once, in a greeting that names the
   room and this command; the greeting comes from the durable reply outbox, so it is
