@@ -156,6 +156,7 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
 - Keep the bridge registry key stable while adopting a valid session ID returned by a completed run. Upstream `/v1/runs` resolves compression-continuation tips when resuming by ID; do not invoke source-ending forks.
 - Keep message ordering FIFO per session, with bounded parallel sessions per agent (default four). Session separation is conversation/history isolation, not isolation of shared files/tools.
 - Preserve session identities across bridge and Hermes container restarts.
+- **Room names follow the conversation.** Hermes names each session itself; the bridge reads that name back from the Hermes API and writes it to the room's name as `<agent> — <session name>`. No extra model call: the name Hermes already chose is reused. The provisioned room keeps the plain agent name, which only `!fleet rename` may change, so the two writers never fight. Switching conversations moves the room's name to the newly selected conversation's name. A name is untrusted text: one line, bounded, free of control characters. A room name the operator chose is never overwritten, and a room the bridge cannot rename is left alone. The lookup is bounded and stops once a session's name is settled.
 - Support typing indicators while an agent starts and runs, insofar as Matrix clients display them.
 - Menu reactions are controller controls, never agent prompt text. Edits and unrelated reactions are not instructions. Attachment captions and voice transcripts are agent inputs, never bridge controls.
 

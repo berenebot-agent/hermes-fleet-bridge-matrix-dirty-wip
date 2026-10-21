@@ -262,6 +262,7 @@ const fleetHelp = `Fleet controls (operator only, in this room):
 Rename agent, Copy agent, Save as template and the template list ask for the new name: reply with
 just the name. An invalid name keeps the prompt alive; !fleet cancel ends it.
 Rename changes the bot display name and dedicated room name, not directories, containers or history.
+A shared room is named "<agent> — <session name>", so a rename moves the agent part of those names too.
 
 Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Copies and agents created from templates start ready to receive work. Delete permanently erases agent files and the agent's own Matrix room, not templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
 
@@ -826,6 +827,20 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 		if err := api(ctx, "PUT", e.mx.Base, roomPath(a.Room)+"/state/m.room.name/", bot.Token, map[string]string{"name": op.Name}, nil, nil); err != nil {
 			return errors.New("room-name update failed; bot name may already have changed; retry to complete the rename")
 		}
+		// Record the name the rename wrote, so the session-name writer knows the
+		// visible name it last set and does not write over the rename.
+		_ = e.s.Update(func(st *State) error {
+			if member := st.Members[op.Source]; member != nil {
+				if tracked := member.Rooms[member.Room]; tracked != nil {
+					tracked.RoomName = op.Name
+				}
+			}
+			return nil
+		})
+		// A shared room's name carries the agent's name as its prefix, so it moves
+		// with the rename. The session names are already known, so this needs no
+		// Hermes call.
+		e.renameSharedRooms(ctx, op.Source, op.Name)
 		return e.finishFleet(op, "")
 	}
 	var a *Member

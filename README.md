@@ -56,6 +56,18 @@ dispatched; existing thread history, mappings and admitted work are preserved.
 Different rooms can run concurrently; turns within a conversation remain FIFO.
 Conversations share the agent's tools/filesystem, not a sandbox.
 
+**Room names follow the conversation.** Hermes names every session itself — an
+instant title from the opening message, then a short model-written title — and the
+bridge reads that name back and puts it in the room's name: an operator-created room
+is called `Iris — Postgres connection pool exhaustion`. The name arrives with the
+first message in a conversation and may be replaced a moment later by the model's
+version. The agent's own provisioned room keeps the plain agent name (`Iris`),
+because that room is the agent's home and only `!fleet rename` changes it. Switching
+conversations with `!new` or `!resume` moves the room's name to the newly selected
+conversation's name, so several sessions with the same agent stay distinguishable in
+the room list. A room name the operator chose themselves is never overwritten, and a
+room the bridge cannot rename is simply left alone.
+
 Container lifecycle is visible in the agent's own room: the agent says when it is
 starting, when it is ready, and when it is shutting down after the idle timeout or an
 operator Fleet stop. These are ordinary replies, so they arrive in order with

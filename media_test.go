@@ -497,6 +497,9 @@ func TestVoiceTurnUsesTextAPIAndQueuesOutputFile(t *testing.T) {
 			replyJSON(w, map[string]string{"run_id": "voice-run", "status": "completed", "output": "MATRIX_FILE: report.txt"})
 		case "/v1/runs/voice-run/events":
 			w.WriteHeader(404)
+		case "/api/sessions/matrix_7b1d853150287e6ea702ef61a5e965a072b676fe1cca75087974b414cb46c8c8":
+			// The session-name lookup that names the room after the session.
+			replyJSON(w, map[string]any{"session": map[string]any{"title": "Voice report"}})
 		default:
 			t.Errorf("unexpected Hermes API path %s", r.URL.Path)
 			w.WriteHeader(404)

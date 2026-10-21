@@ -70,12 +70,27 @@ type Room struct {
 	// WidgetToken authorises the room's widget panel. The widget URL carries it, so it is
 	// readable only by room members.
 	WidgetToken string
+	// RoomName is the name the bridge last wrote to m.room.name, so a later title change
+	// writes only when the visible name would actually differ.
+	RoomName string
 }
 type Session struct {
 	ID, Model, Provider string
 	Seeded              bool
-	Title               string
-	LastUsed            time.Time
+	// Title is the bridge's own label for the conversation: a short excerpt of its
+	// first prompt. It labels the Resume picker and is never the agent's decision.
+	Title string
+	// SessionName is the name Hermes gave the session, read back from the Hermes
+	// API. It names the room the conversation is in. Empty until Hermes names it.
+	SessionName string
+	// TitleChecked is when the bridge last asked Hermes for this session's name, so a
+	// late-arriving title is still picked up without polling on every turn.
+	TitleChecked time.Time
+	// TitleUntil bounds how long the bridge keeps looking for a name. Hermes writes one
+	// with the first message and upgrades it moments later, so a session that stays
+	// unnamed is one whose agent has title generation switched off.
+	TitleUntil time.Time
+	LastUsed   time.Time
 }
 type Turn struct {
 	ID, Room, Thread, Text, Root, Kind, Phase, RunID string

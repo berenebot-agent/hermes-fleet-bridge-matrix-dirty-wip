@@ -1,5 +1,49 @@
 # MVP verification
 
+## Session-named rooms — 2026-10-22
+
+Hermes already names every session: an instant title cut from the opening
+message, then a small-model upgrade to a few words. The bridge now reads that
+name back from the Hermes API and writes it to the room's visible name, so
+several conversations with the same agent are distinguishable in the room list.
+
+- An operator-created room is named `<agent> — <session name>`, for example
+  `testpilot — Explain why F9 couldn't be tested`. The agent's own provisioned
+  room keeps the plain agent name (`testpilot`): that room is the agent's home
+  and only `!fleet rename` changes it, so the two writers never fight.
+- No extra model call. The name Hermes already chose is reused; the bridge only
+  reads `GET /api/sessions/{id}`. The name arrives with the first message in a
+  conversation and may be replaced a moment later by the model's version, so the
+  lookup is repeated briefly and then stops.
+- Switching conversations with `!new` or `!resume` moves the room's name to the
+  newly selected conversation's name.
+- A name is model-generated text and is treated as untrusted: one line, no
+  control characters, bounded length, no surrounding punctuation.
+- A room name the operator chose is never overwritten, and a room the bridge
+  cannot rename is left alone. The rename falls back from the bot's token to the
+  administrator's, because a room the operator created may leave the bot at
+  power level 0.
+- `!fleet rename` moves the agent's name in the shared rooms' names too
+  (`iris — Pool exhaustion` becomes `nova — Pool exhaustion`).
+
+- `gofmt -l .` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T192944-go-gofmt_-l_.-3654845.log`.
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T192945-go-vet_._...-3655054.log`.
+- `go test -race -count=1 ./...` passed (34.191s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T192905-go-test_-race_-count=1_._...-3653602.log`.
+- New fake-endpoint coverage in `sessionname_test.go`: a completed run names
+  the room; the provisioned room keeps the agent name; a name is written only
+  when it changes; a name that is not there yet leaves the room alone and a
+  later lookup applies it; the name is sanitised; the lookup window closes once
+  a name arrived and a later lookup does not reopen it; the lookup stops once the
+  name is settled; a rename moves the shared room names; a name the operator
+  chose is not overwritten.
+- **Not established by these checks.** The name has not been observed on the
+  running deployment, and how Element Web renders a renamed direct room in its
+  room list and People view is unverified. Hermes' own title generation is off
+  for some agents, and such a room keeps the name it had.
+
 ## Room menu widget panel — 2026-10-22
 
 Every room the bridge serves now also carries an HTML menu panel, published as a

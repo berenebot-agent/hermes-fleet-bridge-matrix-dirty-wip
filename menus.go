@@ -385,9 +385,16 @@ func (e *Engine) menuCommand(ctx context.Context, id, turn string) bool {
 				break
 			}
 			r.Selected = value
-			getSession(m, room, "").LastUsed = time.Now().UTC()
+			selected := getSession(m, room, "")
+			selected.LastUsed = time.Now().UTC()
+			// A switched conversation has its own name, and the room's visible
+			// name follows the conversation the room is now using. Until the new
+			// conversation is named, the room shows the agent alone.
+			selected.TitleChecked = time.Time{}
+			selected.TitleUntil = time.Time{}
+			selected.SessionName = ""
 			expireMenus(m, room)
-			reply = "Selected conversation: " + conversationTitle(getSession(m, room, "")) + ". Matrix history is unchanged; future messages use this conversation."
+			reply = "Selected conversation: " + conversationTitle(selected) + ". Matrix history is unchanged; future messages use this conversation."
 		case "resume-page":
 			getSession(m, room, "")
 			keys := []string{}

@@ -320,6 +320,44 @@ func (m *Matrix) nameBot(ctx context.Context, bot Credential, display string) er
 	return api(ctx, "PUT", m.Base, path, bot.Token, map[string]string{"displayname": display}, nil, nil)
 }
 
+// roomName reads a room's current visible name. It returns "" when the room has none.
+func (m *Matrix) roomName(ctx context.Context, id, room string) string {
+	bot := m.cred("agent_" + id)
+	var named struct {
+		Name string `json:"name"`
+	}
+	if api(ctx, "GET", m.Base, roomPath(room)+"/state/m.room.name/", bot.Token, nil, &named, nil) != nil {
+		admin := m.cred(m.c.Admin)
+		if admin.Token == "" {
+			return ""
+		}
+		if api(ctx, "GET", m.Base, roomPath(room)+"/state/m.room.name/", admin.Token, nil, &named, nil) != nil {
+			return ""
+		}
+	}
+	return named.Name
+}
+
+// setRoomName writes the room's visible name. The bot tries first, because in the rooms it
+// created it holds power; a room the operator created may leave the bot at power 0, where
+// only the administrator can rename it. Either account may refuse, and the caller treats
+// that as a cosmetic miss rather than a failure.
+func (m *Matrix) setRoomName(ctx context.Context, id, room, name string) error {
+	if name == "" {
+		return errors.New("room name is empty")
+	}
+	bot := m.cred("agent_" + id)
+	err := api(ctx, "PUT", m.Base, roomPath(room)+"/state/m.room.name/", bot.Token, map[string]string{"name": name}, nil, nil)
+	if err == nil {
+		return nil
+	}
+	admin := m.cred(m.c.Admin)
+	if admin.Token == "" {
+		return err
+	}
+	return api(ctx, "PUT", m.Base, roomPath(room)+"/state/m.room.name/", admin.Token, map[string]string{"name": name}, nil, nil)
+}
+
 // grantAdmin gives the configured administrator real power in the agent's room. Tuwunel's
 // private_chat default leaves the invited human at power level 0, which blocks renaming the
 // room and filing it into a space. The bot is the room creator, so it can always repair this.

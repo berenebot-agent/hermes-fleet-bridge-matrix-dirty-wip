@@ -292,6 +292,11 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					session.Title = v.Media.Name
 				}
 			}
+			// Hermes names a session from its first user message and may upgrade
+			// that name moments later, so the bridge looks for it for a while.
+			if session.TitleUntil.IsZero() {
+				session.TitleUntil = time.Now().UTC().Add(titleCheckWindow)
+			}
 			session.LastUsed = time.Now().UTC()
 			input := mediaPrompt(v, v.Text)
 			if v.Thread != "" && !session.Seeded {
@@ -438,6 +443,9 @@ func (e *Engine) work(ctx context.Context, id, turn string) {
 					}
 					return nil
 				})
+				// The session's own name is now worth reading: Hermes wrote it with
+				// this turn's first message, or will upgrade it moments from now.
+				e.refreshRoomName(ctx, id, turnRoom(m, t), endpoint)
 				return
 			}
 			if r.Status == "waiting_for_approval" && r.Approval.ID != "" && t.Approval != r.Approval.ID {
@@ -594,6 +602,9 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	// is a room-lifecycle step, so it happens here rather than inside a command.
 	for room := range m.Rooms {
 		e.ensureWidget(ctx, id, room)
+		// The visible room name carries the session's own name, which Hermes writes
+		// after the first turn and may upgrade a moment later.
+		e.ensureSessionName(ctx, id, room)
 	}
 	rt.mu.Lock()
 	if rt.controls == nil {

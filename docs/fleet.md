@@ -212,6 +212,13 @@ the current running/stopped and paused/available state is preserved. The saved n
 survives bridge restarts. Future typed Fleet commands and shared-room display-name
 addresses use the new name; the immutable Matrix account handle still works.
 
+A rename changes the agent's name everywhere it appears, including the prefix of
+the shared rooms' names: a shared room called `iris — Postgres pool exhaustion`
+becomes `nova — Postgres pool exhaustion`. The agent's own dedicated room is
+renamed outright to the new name and is not given a session suffix. A shared room
+the bridge has not named yet keeps the name it has, and a shared room the bridge
+cannot rename is left alone rather than failing the rename.
+
 Rename is recorded durably before either Matrix request. Profile and room updates
 are not atomic: if one fails, their visible names can temporarily differ. The Fleet
 room reports the held operation; use `!fleet retry` to finish it. Restart retains
