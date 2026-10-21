@@ -323,6 +323,21 @@ Baked templates are larger than bare ones because they contain the dependency
 environment, and every agent created from one carries its own copy. Budget for
 that on the data volume.
 
+The bake helper prunes by default: it replaces the large bundled binaries in
+each dependency generation's `workspace/tools/` with symlinks to their matching
+`/opt/hermes/tools/` entries in the image (Python, ffmpeg, Chromium, Node, npm,
+uv and ripgrep), and removes `data/cache/uv/` (download/build cache). It keeps
+Python tool source, the installed venv, lockfiles, plugins and agent data.
+This applies only to the resulting template, never to the source agent or to
+ordinary Fleet copies/full snapshots. Existing agents are not automatically pruned.
+
+With the tested Hermes image, this reduced a warmed home from about 1.8 GB to
+257 MB while retaining a 10–15 second start without dependency installs. These
+are measurements, not size or timing guarantees. Lazy installs remain enabled:
+adding dependencies or updating Hermes can rebuild the environment and grow the
+directory again. Recheck imports and actual tool execution on image upgrades;
+successful chat alone does not verify every optional Hermes feature.
+
 `!fleet save-template iris as iris-snapshot` creates a **Full snapshot** template.
 It copies all persistent files, including memories, conversation databases,
 instructions, skills, provider credentials and integration settings. It is an

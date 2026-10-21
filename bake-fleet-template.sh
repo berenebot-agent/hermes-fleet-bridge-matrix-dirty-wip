@@ -11,6 +11,7 @@
 #       then stop it. This is the "spin it up, let the install happen, stop it"
 #       step: what lands in <template>/data is what created agents inherit.
 #
+# Baked templates link duplicate tool binaries to the image and omit uv cache.
 # Nothing here provisions Matrix: no account, no room, no bridge involvement.
 set -eu
 cd "$(dirname "$0")"
@@ -21,8 +22,33 @@ WAIT=${BAKE_WAIT:-600}
 say() { printf '%s\n' "$*" >&2; }
 die() { say "bake: $*"; exit 1; }
 
+prune() {
+	# Never follow links while pruning an agent-controlled tree.
+	[ ! -L "$dir/data" ] || die "data must not be a symlink"
+	find "$dir/data" -type d -path '*/installs/*/environments/*/workspace/tools' -prune -exec sh -eu -c '
+		for tools do
+			for path in "$tools"/python-*-linux-* "$tools"/ffmpeg-*-linux-* \
+				"$tools"/chromium-* "$tools"/node-*-linux-* "$tools"/uv-*-linux-* \
+				"$tools"/npm-*-linux-* "$tools"/ripgrep-*-linux-*; do
+				[ -d "$path" ] && [ ! -L "$path" ] || continue
+				target=/opt/hermes/tools/${path##*/}
+				rm -rf -- "$path"
+				ln -s "$target" "$path"
+			done
+		done
+	' sh {} +
+	if [ -d "$dir/data/cache" ] && [ ! -L "$dir/data/cache" ]; then
+		rm -rf -- "$dir/data/cache/uv"
+	fi
+	# shortcut: these tool bundles duplicate the current Hermes image; recheck
+	# imports and tool execution when upgrading that image. Keep the venv/lock.
+}
+
 warm() {
 	name=$1
+	case "$name" in
+	*[!a-z0-9._-]*|""|.|..) die "invalid template name" ;;
+	esac
 	dir=$FLEET_TEMPLATE_DIR/$name
 	[ -f "$dir/fleet-template.json" ] || die "$dir is not a template"
 	[ -d "$dir/data" ] || die "$dir has no data directory"
@@ -34,20 +60,18 @@ warm() {
 	waited=0
 	while [ "$waited" -lt "$WAIT" ]; do
 		if docker compose -p "$project" --project-directory "$dir" -f "$dir/docker-compose.yml" logs 2>&1 |
-			grep -q 'Installing Python dependencies'; then
+			grep -Eq '✓ Installing Python dependencies|dependency environment: current'; then
 			say "tooling installed after ${waited}s"
 			break
 		fi
 		sleep 5
 		waited=$((waited + 5))
 	done
-	[ "$waited" -lt "$WAIT" ] || say "warning: install marker not seen within ${WAIT}s; stopping anyway"
-
-	# Let the installer finish writing before the project goes down.
-	sleep 20
-	docker compose -p "$project" --project-directory "$dir" -f "$dir/docker-compose.yml" down --timeout 60 >/dev/null 2>&1 || true
+	docker compose -p "$project" --project-directory "$dir" -f "$dir/docker-compose.yml" down --timeout 60 >/dev/null 2>&1 || die "shutdown failed; template was not pruned"
+	[ "$waited" -lt "$WAIT" ] || die "install did not finish within ${WAIT}s; template was not pruned"
 	# A stopped container leaves its live socket behind; it is runtime state.
 	find "$dir/data" -type s -delete 2>/dev/null || true
+	prune
 	say "warmed $name ($(du -sh "$dir/data" | cut -f1) of persistent data)"
 }
 
@@ -64,10 +88,11 @@ case "${1:-}" in
 	src=$1
 	name=$2
 	dst=$FLEET_TEMPLATE_DIR/$name
+	dir=$dst
 	[ -d "$src" ] || die "$src is not a directory"
 	[ -e "$dst" ] && die "$dst already exists; templates are never overwritten"
 	case "$name" in
-	*[!a-z0-9._-]*|"") die "template name must be lowercase letters, digits, dots, dashes or underscores" ;;
+	*[!a-z0-9._-]*|""|.|..) die "template name must be lowercase letters, digits, dots, dashes or underscores" ;;
 	esac
 
 	say "copying $src into $dst"
@@ -80,6 +105,7 @@ case "${1:-}" in
 	printf '{"Kind":"Clean"}\n' >"$dst/fleet-template.json"
 	find "$dst/data" -type s -delete 2>/dev/null || true
 	chmod -R go-rwx "$dst" 2>/dev/null || true
+	prune
 	say "baked $name ($(du -sh "$dst/data" | cut -f1) of persistent data)"
 	;;
 esac
