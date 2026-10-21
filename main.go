@@ -18,81 +18,6 @@ import (
 	"time"
 )
 
-func reconcile(ctx context.Context, c Config, s *Store, mx *Matrix, d *Docker) error {
-	if c.FleetDir != "" {
-		return reconcileFleet(ctx, c, s, mx, d)
-	}
-	incoming := map[string]*Member{}
-	projects := map[string]bool{}
-	ports := map[int]bool{}
-	for _, dir := range c.Dirs {
-		id := filepath.Base(dir)
-		m, err := d.discover(ctx, dir, c.Overrides[id])
-		if err != nil {
-			return fmt.Errorf("agent %s: %w", id, err)
-		}
-		if projects[m.Project] {
-			return errors.New("configured members share a Compose project; lifecycle must not overlap")
-		}
-		projects[m.Project] = true
-		if m.Network == "host" {
-			if ports[m.Port] {
-				return errors.New("host-network Hermes agents require unique API port overrides")
-			}
-			ports[m.Port] = true
-		}
-		if err = d.checkProject(ctx, m); err != nil {
-			return err
-		}
-		old := s.View().Members[id]
-		if old != nil && pending(old) > 0 && (old.Dir != m.Dir || old.Project != m.Project || old.Service != m.Service || old.Port != m.Port || old.Network != m.Network) {
-			return errors.New("member endpoint/identity changed while work is outstanding; restore the original configuration")
-		}
-		host := "0.0.0.0"
-		if m.Network == "host" {
-			host = "127.0.0.1"
-		}
-		key, err := configureEnv(filepath.Join(m.Home, ".env"), host, m.Port)
-		if err != nil {
-			return fmt.Errorf("agent %s: %w", id, err)
-		}
-		if err = mx.rememberKey(id, key); err != nil {
-			return err
-		}
-		incoming[id] = m
-	}
-	return s.Update(func(st *State) error {
-		for id, m := range st.Members {
-			if m.Managed || m.Controller {
-				return errors.New("managed fleet state exists; restore FLEET_DIR and FLEET_TEMPLATE_DIR rather than disabling management")
-			}
-			if incoming[id] == nil {
-				m.Enabled = false
-				for _, t := range m.Turns {
-					if t.Phase == "queued" && t.Kind == "" {
-						t.Phase = "done"
-						addNotice(m, t.ID+"-removed", t.Room, t.Thread, "Agent removed: this queued turn was cancelled. Active runs may finish; history is retained.")
-					}
-				}
-			}
-		}
-		for id, m := range incoming {
-			if old := st.Members[id]; old != nil {
-				old.Dir = m.Dir
-				old.Home = m.Home
-				old.Project = m.Project
-				old.Service = m.Service
-				old.Network = m.Network
-				old.Port = m.Port
-				old.Files = m.Files
-				old.Enabled = true
-			} else {
-				st.Members[id] = m
-			}
-		}
-		return nil
-	})
-}
 func homeserverConfig(c Config) error {
 	host, port, _ := net.SplitHostPort(c.MatrixListen)
 	n, _ := strconv.Atoi(port)
@@ -117,18 +42,11 @@ func run(ctx context.Context) error {
 		return err
 	}
 	d := newDocker()
-	if len(c.Dirs) > 0 {
-		startup, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		err = reconcile(startup, c, s, mx, d)
-		cancel()
-		if err != nil {
-			return err
-		}
-	}
-	if len(c.Dirs) == 0 {
-		if err = reconcile(ctx, c, s, mx, d); err != nil {
-			return err
-		}
+	startup, stopStartup := context.WithTimeout(ctx, 2*time.Minute)
+	err = reconcileFleet(startup, c, s, mx, d)
+	stopStartup()
+	if err != nil {
+		return err
 	}
 	if err = homeserverConfig(c); err != nil {
 		return err
@@ -195,7 +113,7 @@ func run(ctx context.Context) error {
 	engine.Start(workCtx)
 	defer func() { ready.Store(false); cancel(); engine.wg.Wait() }()
 	ready.Store(true)
-	log.Printf("ready: %d configured agents; private Matrix identity locked", len(c.Dirs))
+	log.Printf("ready: %d fleet members; private Matrix identity locked", len(s.View().Members))
 	select {
 	case <-ctx.Done():
 		return nil

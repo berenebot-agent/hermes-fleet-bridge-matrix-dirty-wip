@@ -7,11 +7,89 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 type FleetTemplate struct{ Name, Kind, Operation string }
 type fleetOwner struct{ Operation, Identity string }
+
+func fleetDirectoryIdentity(dir string) (string, error) {
+	b, err := readPrivate(filepath.Join(dir, ".fleet-owner.json"))
+	if os.IsNotExist(err) {
+		return filepath.Base(dir), nil
+	}
+	var owner fleetOwner
+	if err != nil || json.Unmarshal(b, &owner) != nil || owner.Operation == "" || !localpart.MatchString(owner.Identity) || owner.Identity == fleetID {
+		return "", errors.New("invalid fleet ownership record")
+	}
+	return owner.Identity, nil
+}
+
+func fleetDirectoryPort(dir string) (int, error) {
+	if err := realDirectory(filepath.Join(dir, "data")); err != nil {
+		return 0, err
+	}
+	b, err := readPrivate(filepath.Join(dir, "data", ".env"))
+	if os.IsNotExist(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, errors.New("cannot read agent API configuration")
+	}
+	port, seen := 0, false
+	quote := byte(0)
+	for _, line := range strings.Split(strings.ReplaceAll(string(b), "\r\n", "\n"), "\n") {
+		if quote != 0 {
+			if quoteEnd(string(quote)+line, quote) >= 0 {
+				quote = 0
+			}
+			continue
+		}
+		match := assignment.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		value := strings.TrimSpace(match[2])
+		if len(value) > 0 && (value[0] == '\'' || value[0] == '"') {
+			end := quoteEnd(value, value[0])
+			if end < 0 {
+				quote = value[0]
+				value = ""
+			} else {
+				value = value[1:end]
+			}
+		} else if i := strings.Index(value, " #"); i >= 0 {
+			value = strings.TrimSpace(value[:i])
+		}
+		if match[1] != "API_SERVER_PORT" {
+			continue
+		}
+		port, err = strconv.Atoi(value)
+		if seen || err != nil || port < 1024 || port > 65535 {
+			return 0, errors.New("invalid or duplicate persisted API port")
+		}
+		seen = true
+	}
+	return port, nil
+}
+
+func restoreFleetDirectorySettings(m *Member) error {
+	b, err := readPrivate(filepath.Join(m.Dir, ".fleet-availability.json"))
+	if !os.IsNotExist(err) {
+		var availability struct{ Paused bool }
+		if err != nil || json.Unmarshal(b, &availability) != nil {
+			return errors.New("invalid agent availability record")
+		}
+		m.Paused = availability.Paused
+	}
+	settings, err := readFleetSettings(m.Dir)
+	if err != nil {
+		return err
+	}
+	m.DefaultModel, m.DefaultProvider, m.InitialSessions = settings.DefaultModel, settings.DefaultProvider, settings.Sessions
+	return nil
+}
 
 type fleetSettings struct {
 	DefaultModel, DefaultProvider string

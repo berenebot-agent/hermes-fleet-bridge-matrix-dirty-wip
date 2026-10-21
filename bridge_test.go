@@ -89,7 +89,8 @@ func TestConfiguration(t *testing.T) {
 	t.Setenv("PUBLIC_URL", "https://chat.test")
 	t.Setenv("MATRIX_SERVER_NAME", "chat.test")
 	t.Setenv("ADMIN_PASSWORD", "private-password-for-tests")
-	t.Setenv("HERMES_DIRS", "")
+	t.Setenv("FLEET_DIR", filepath.Join(t.TempDir(), "agents"))
+	t.Setenv("FLEET_TEMPLATE_DIR", filepath.Join(t.TempDir(), "templates"))
 	t.Setenv("HERMES_OVERRIDES", "")
 	if _, err := loadConfig(); err != nil {
 		t.Fatal(err)

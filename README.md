@@ -86,7 +86,7 @@ controlled by the bundled Element configuration.
    ```
 
    Edit `.env` locally. Set `PUBLIC_URL`, `MATRIX_SERVER_NAME`, a unique strong
-   `ADMIN_PASSWORD` (16+ characters), `HERMES_DIRS`, and `DOCKER_GID` from the last
+   `ADMIN_PASSWORD` (16+ characters), and `DOCKER_GID` from the last
    command. Set `HFB_UID`/`HFB_GID` to the user/group that own the bridge and member
    data directories (defaults 1000:1000). That user must be able to write each
    member's `data/.env`. Do not print or commit populated environment files.
@@ -96,7 +96,8 @@ controlled by the bundled Element configuration.
    ```dotenv
    PUBLIC_URL=https://chat.example.com
    MATRIX_SERVER_NAME=chat.example.com
-   HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/lyra
+   FLEET_DIR=/opt/hermes-matrix/data/fleet
+   FLEET_TEMPLATE_DIR=/opt/hermes-matrix/data/templates
    HERMES_OVERRIDES={"iris":{"service":"hermes","port":8642}}
    ```
 
@@ -115,7 +116,11 @@ controlled by the bundled Element configuration.
    Never add individual agent mounts beneath the parent mounts. Existing
    installations must migrate paths/state while stopped; see [Fleet setup](docs/fleet.md).
 
-   The directory basename is the initial agent identity and room name. Managed
+   Startup scans immediate agent directories under `FLEET_DIR`; there is no
+   manual agent directory list. Keep unrelated files outside that directory.
+   Existing `.fleet-owner.json` records preserve managed identities after a clean
+   bootstrap; legacy agents without that record use their directory basename.
+   The directory basename is the initial room name. Managed
    Fleet renaming changes the display/room names, not that identity or directory. Basenames
    must be unique lowercase localparts (`a-z`, digits, `_`, `.`, `-`); duplicate
    Compose project names are rejected. Use `HERMES_OVERRIDES` only when needed:
@@ -129,7 +134,8 @@ controlled by the bundled Element configuration.
 
    Bridge-network agents get an internal `0.0.0.0` API listener reached through
    their inspected private container IP, never through a published API port.
-   Host-network agents get loopback listeners and need distinct `port` overrides.
+   Host-network agents get loopback listeners and need distinct API ports; initial
+   discovery recovers `API_SERVER_PORT` from each member's `data/.env`, unless overridden.
    Do not expose Hermes API ports publicly. Agent state is never replaced and
    `docker compose down` is never passed volume/image deletion flags.
 
@@ -153,7 +159,7 @@ controlled by the bundled Element configuration.
    during initialization. `GET /healthz` reports readiness, held turns, blocked
    replies and sync failures without exposing credentials. Docker health becomes
    unhealthy when operator attention is needed; it does not kill active agents.
-   An empty `HERMES_DIRS` permits a Matrix/Element-only bootstrap.
+   An empty fleet directory bootstraps the homeserver and Fleet room without agents.
 
    Open the HTTPS URL and log in. A message to an offline configured agent starts
    **only that Compose project**, waits for authenticated readiness, and dispatches
@@ -163,6 +169,14 @@ controlled by the bundled Element configuration.
    Status/stop/approval controls remain available during cold startup and slow
    model queries; lifecycle transitions and reply delivery run independently of
    the command scheduler.
+
+### Phone and Web verification
+
+For a fresh account, start with Element X, complete its supported security setup,
+and save the recovery key privately. Then verify the Web login using the trusted
+phone or recovery key. Existing sessions should remain usable; new logins may
+require verification. Account verification does not enable encryption in agent
+rooms. See [client setup and recovery](docs/client-setup.md).
 
 ## Commands
 

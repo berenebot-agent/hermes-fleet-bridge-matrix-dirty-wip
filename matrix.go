@@ -847,7 +847,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 						continue
 					}
 					t.Phase = "done"
-					addNotice(current, t.ID+"-disabled", room, t.Thread, "This agent has been removed from HERMES_DIRS; dispatch is disabled.")
+					addNotice(current, t.ID+"-disabled", room, t.Thread, "This agent has been removed from the fleet; dispatch is disabled.")
 				} else if len(t.Text) > 16<<10 || len(t.Root) > 16<<10 {
 					t.Phase = "done"
 					addNotice(current, t.ID+"-size", room, t.Thread, "Message or thread root exceeds the 16 KiB text limit; nothing was dispatched.")

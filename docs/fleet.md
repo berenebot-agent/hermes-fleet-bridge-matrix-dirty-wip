@@ -26,7 +26,6 @@ Run it from the installation directory. Explicit absolute paths in the private
 ```dotenv
 FLEET_DIR=/opt/hermes-matrix/data/fleet
 FLEET_TEMPLATE_DIR=/opt/hermes-matrix/data/templates
-HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/lyra
 ```
 
 Use the actual absolute host paths, not `/data`, unless that is genuinely the
@@ -58,11 +57,36 @@ Rebuild/recreate from the installation directory:
 docker compose down && docker compose up -d --build
 ```
 
-`HERMES_DIRS` enrolls existing agents. Agents created in Fleet are recorded in
-controller state and survive bridge restarts without editing this variable or
-adding mounts. Arbitrary directories are not automatically enrolled. A deleted
-agent's stale `HERMES_DIRS` entry does not resurrect it. Removing an entry does
-not delete or disable an already-managed agent: use Fleet controls instead.
+Startup scans immediate, non-hidden agent directories under `FLEET_DIR`.
+`HERMES_DIRS` is no longer used; remove it from installation configuration.
+Each directory must contain a supported Compose project and its own `data/`.
+Invalid directories, symlinks, duplicate identities/projects and colliding host
+API ports fail startup rather than enrolling an unsafe fleet. Keep unrelated
+files outside this directory. Hidden staging directories and pending operation
+destinations are left to durable operation recovery.
+
+Controller state remains authoritative for existing identities, names, pause
+state and conversation mappings. Newly discovered directories recover their
+identity from `.fleet-owner.json` when present, or use the directory basename
+for legacy agents. A malformed owner file is an error, not a reason to assign
+a different identity. Discovery also recovers the persisted API port, optional
+availability record and snapshot settings. Existing API keys are preserved.
+Deleted members are not resurrected; use Fleet's confirmed creation flow to
+reuse a deleted name. Removing a directory by hand does not delete an agent:
+use Fleet controls instead.
+
+Templates are already discovered from immediate template directories under
+`FLEET_TEMPLATE_DIR` with valid `fleet-template.json` manifests. They are recipes
+or snapshots, not containers, and discovery never starts them.
+
+For an explicitly authorised clean Matrix reset, stop the bridge and reset
+`data/matrix/`, `data/controller/` and `data/secrets/` together, keeping fleet,
+templates and deployment configuration. This loses Matrix history, credentials,
+queued work and controller conversation mappings. Back up first if any of those
+are needed. On bootstrap agents are rediscovered, bots and private rooms are
+provisioned anew, and Hermes homes remain intact. Old room IDs/bookmarks do not
+survive. Restored snapshot settings are not a replacement for current controller
+state: display names and recent conversation choices may be lost in a reset.
 
 Managed storage paths are persisted as ownership boundaries. Changing/unsetting
 them later fails closed; it is not an implicit migration or reset. Backups must

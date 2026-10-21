@@ -10,7 +10,7 @@
 
 Build a **standalone, self-hosted Matrix chat platform for a fleet of existing Hermes agents**. It replaces Telegram as the chat surface, while carrying forward the existing fleet bridge's primary job: automatically start Hermes containers on a message and stop them when idle.
 
-**Non-negotiable user experience:** The end user receives **one HTTPS URL, a username, and a password**. They sign in and immediately see their provisioned agent rooms. They must **not** need to choose/configure a homeserver, register, create rooms, accept invitations, change permissions, find bot IDs, type `@mentions`, install plugins, manage access tokens, or complete device verification.
+**User experience:** The end user receives **one HTTPS URL, a username, and a password**. Provisioning handles accounts, rooms and membership. They must **not** need to register, create rooms, accept invitations, change permissions, find bot IDs, type `@mentions`, install plugins or manage access tokens. Bundled Web fixes the homeserver; native clients control their own server selection. Standard account/device verification and private recovery-key setup are accepted for Element X and subsequent Web logins; do not suppress verification or claim that unencrypted rooms eliminate account identity requirements. See [client setup](client-setup.md).
 
 The user is not restricted to what was provisioned: they may create spaces and rooms, invite an agent's bot into them, and the bot joins, greets the room once, and answers there like any other member. In a room the operator created, the bot answers when mentioned by default and can be told otherwise with `!require_mention off`; its own provisioned room never needs a mention. See §5.
 
@@ -66,7 +66,6 @@ PUBLIC_URL=https://chat.example.com
 MATRIX_SERVER_NAME=chat.example.com
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-strong-secret
-HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/hermes-dev,/opt/hermes-matrix/data/fleet/hermes-prod
 IDLE_TIMEOUT=15m
 START_TIMEOUT=120s
 ```
@@ -101,9 +100,9 @@ Persist credentials before creating accounts, use deterministic room aliases and
 
 ## 5. Agent discovery, accounts and rooms
 
-When running the controller without Fleet management, the source of truth is `HERMES_DIRS`, not an incidental list of running containers. Directory basename is the default stable agent ID and room display name.
+Fleet management is the only membership mode. Startup scans immediate agent directories under `FLEET_DIR`, not an incidental list of running containers. Existing controller identities remain authoritative; new discovery recovers `.fleet-owner.json` identities or uses directory basenames for legacy agents. Templates are discovered from valid manifests under `FLEET_TEMPLATE_DIR`. There is no manual agent directory list.
 
-**Managed Fleet extension:** When `FLEET_DIR` and `FLEET_TEMPLATE_DIR` are configured, `HERMES_DIRS` enrols existing members and durable controller state also owns members created through the private operator-only Fleet room. Its compact agent menu keeps status, display/room renaming, full duplication and full-snapshot template saving top-level; More · Lifecycle groups start, shutdown, pause/enable and guarded permanent deletion. Clean/full templates support creation. New identities are independent of reusable display names. Rename preserves identity, directories, containers and conversations, and durably retries Matrix profile/room updates without draining work. All writable agent storage is self-contained under the mounted managed parent; future connected-only membership must not imply deletion authority. Lifecycle/snapshot operations drain admitted work, persist progress and fail closed across restart; permanent deletion retains Matrix history. Detailed ownership, confirmations, snapshot semantics, setup and limits are in [fleet.md](fleet.md). Legacy membership-removal behaviour below applies only without this extension.
+**Managed Fleet:** `FLEET_DIR` and `FLEET_TEMPLATE_DIR` are required. Durable controller state owns enrolled members and members created through the private operator-only Fleet room. Its compact agent menu keeps status, display/room renaming, full duplication and full-snapshot template saving top-level; More · Lifecycle groups start, shutdown, pause/enable and guarded permanent deletion. Clean/full templates support creation. New identities are independent of reusable display names. Rename preserves identity, directories, containers and conversations, and durably retries Matrix profile/room updates without draining work. All writable agent storage is self-contained under the mounted managed parent; future connected-only membership must not imply deletion authority. Lifecycle/snapshot operations drain admitted work, persist progress and fail closed across restart; permanent deletion retains Matrix history. Detailed discovery, ownership, confirmations, snapshot semantics, setup and limits are in [fleet.md](fleet.md). Use Fleet controls to remove agents, not filesystem deletion.
 
 Managed Fleet is enabled by the default Compose deployment, with parent mounts
 for `./data/fleet` and `./data/templates` at their absolute host paths. It extends
@@ -131,7 +130,7 @@ Membership is the access boundary: anyone who can post in a room the bot has joi
 - Each room the bot serves has its own backfill anchor, mention policy, selected conversation and retained bridge-managed conversation inventory.
 - **Mention policy is per agent/room.** The provisioned room never requires a mention and cannot be switched to mention-only mode; a room the operator created requires one until `!require_mention off` is run in that room. On joining a room by invitation the agent posts one greeting naming the room, stating that it replies only when mentioned, and giving `!require_mention off` as the way to change that — once per room, from the reply outbox, so a restart or a redelivery cannot repeat it and a room the operator already has gets no retroactive greeting. Commands and valid menu reactions are always processed without a mention, except in a room shared by several of the fleet's agents' bots, where an unaddressed command is refused with a message naming the agent the sender should address (`!stop` stays global and acts in every bot's conversation there). A message addressed to another agent of the fleet — its handle opening the text, or an explicit mention of it without this agent — is ignored by the other agents rather than answered, whatever the room's reply mode; only the opening token counts, so prose that merely names another agent still reaches this one. The menu calls this Reply mode; changing it neither wakes Hermes nor changes conversation selection.
 - A **space** is joined but never dispatched from: it is a container, not a conversation.
-- Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and unsupported event types. Supported image/file/audio messages follow the same room/mention rules. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A removed agent (no longer in `HERMES_DIRS`) stops dispatching and does not announce itself in operator-created rooms.
+- Senders from reserved agent namespaces are ignored, as are edits, unrelated reactions and unsupported event types. Supported image/file/audio messages follow the same room/mention rules. Only reactions bound to a persisted menu, exact owner and originating room can select controls. A deleted agent stops dispatching and does not announce itself in operator-created rooms.
 - Replies are routed back to the room and thread they came from. A room the bot is removed from stops being served; a later re-invite starts a fresh conversation.
 - At most 100 rooms are served per agent; further invitations stay pending.
 
@@ -267,7 +266,7 @@ Actual Element X tap behavior is a separate acceptance check, not yet verified.
 - Private rooms, minimum necessary Matrix power levels, and each bot scoped to the rooms it was invited to.
 - Room membership is the access boundary: only members of a room the bot has joined can wake that agent, and only an approved human's invitation adds a room. Bot accounts and bot-originated events never wake an agent, so agents cannot loop or be woken by each other. Anyone who can invite the bot into a room chooses where that agent runs, so who may join the operator's rooms is part of the security boundary.
 - HTTPS via external reverse proxy; normal Matrix password authentication, rate limits and no anonymous bootstrap exposure.
-- **No E2EE in v1** to avoid device-verification and bot key management complexity. Clearly disclose that the homeserver stores messages in server-readable form.
+- **No room E2EE in v1**: bots do not manage encryption keys. Client account/device verification remains separate and is supported through normal client flows. Clearly disclose that the homeserver stores room messages in server-readable form.
 - Never expose admin passwords, bot tokens, secrets or agent API keys through Element configuration, room messages or logs.
 - Restrict `./data/secrets` permissions; manage credentials without overwriting working credentials on restarts.
 - Docker socket access confers near-host-root privileges. Keep the controller trusted and private; do not expose a raw Docker API or interpolate untrusted room text into shell/Compose arguments.
@@ -282,7 +281,7 @@ Actual Element X tap behavior is a separate acceptance check, not yet verified.
 ## 11. Acceptance tests
 
 1. `docker compose up -d` starts **one** application service containing Matrix, Element and controller. One hostname serves the UI and Matrix client endpoints.
-2. A new human user uses **only** URL + username + password and immediately sees accessible agent rooms. No other Matrix setup, join, mention or verification.
+2. A new human user logs in with the provisioned credentials and sees accessible agent rooms without manual registration, room joins or mentions. Complete standard client account/device verification and recovery setup as needed; confirm existing sessions remain usable after reopening. Fresh devices may require verification.
 3. Three configured Compose directories create exactly three stable agent identities and visible private rooms.
 4. Posting text to a stopped agent wakes the right Compose project and produces one logical Hermes turn and one correctly routed reply.
 5. Restart the bridge between receipt and Hermes startup: the persisted event resumes without duplicate run.

@@ -756,7 +756,7 @@ func TestFleetExpiredConfirmationAndStateRecovery(t *testing.T) {
 
 func TestFleetReconcilePersistsPauseAndDoesNotResurrectDeletedDirectory(t *testing.T) {
 	e, ctx, _, _ := fleetFixture(t)
-	e.c.Dirs = []string{e.s.View().Members["iris"].Dir}
+	dir := e.s.View().Members["iris"].Dir
 	fleetTestCommand(t, e, ctx, "!fleet pause iris")
 	completeFleetTestOperation(t, e, ctx)
 	if err := reconcileFleet(ctx, e.c, e.s, e.mx, e.docker); err != nil {
@@ -774,7 +774,7 @@ func TestFleetReconcilePersistsPauseAndDoesNotResurrectDeletedDirectory(t *testi
 		t.Fatal("delete did not reach durable destructive phase")
 	}
 	// Simulate a restart after filesystem deletion, before final controller state was saved.
-	if err := deleteFleetTree(e.c.FleetDir, e.c.Dirs[0]); err != nil {
+	if err := deleteFleetTree(e.c.FleetDir, dir); err != nil {
 		t.Fatal(err)
 	}
 	if err := reconcileFleet(ctx, e.c, e.s, e.mx, e.docker); err != nil {
@@ -785,7 +785,7 @@ func TestFleetReconcilePersistsPauseAndDoesNotResurrectDeletedDirectory(t *testi
 		t.Fatal(err)
 	}
 	if fleetMember(e.s.View(), "iris") != nil {
-		t.Fatal("stale HERMES_DIRS entry resurrected a deleted agent")
+		t.Fatal("startup resurrected a deleted agent")
 	}
 }
 

@@ -86,8 +86,23 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 			dirs[m.Dir] = id
 		}
 	}
-	for _, dir := range c.Dirs {
+	entries, err := os.ReadDir(c.FleetDir)
+	if err != nil {
+		return errors.New("cannot scan fleet directory")
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue // Hidden staging directories belong to operation recovery, not discovery.
+		}
+		dir := filepath.Join(c.FleetDir, name)
 		if dirs[dir] != "" {
+			continue
+		}
+		if !entry.IsDir() || !fleetName(name) {
+			return fmt.Errorf("unsafe fleet entry %s: expected an agent directory", name)
+		}
+		if op := view.FleetOperation; op != nil && op.Action != "save-template" && op.Name == name {
 			continue
 		}
 		deleted := false
@@ -97,11 +112,33 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 			}
 		}
 		if !deleted {
-			dirs[dir] = filepath.Base(dir)
+			id, err := fleetDirectoryIdentity(dir)
+			if err != nil {
+				return fmt.Errorf("agent %s: %w", name, err)
+			}
+			if other := view.Members[id]; other != nil {
+				return fmt.Errorf("agent %s: identity already belongs to another or deleted member", name)
+			}
+			for other, existing := range dirs {
+				if existing == id && other != dir {
+					return errors.New("fleet directories share an agent identity")
+				}
+			}
+			retiredName := false
+			for _, retired := range view.Members {
+				if retired.Deleted && agentName(retired) == name {
+					retiredName = true
+				}
+			}
+			if retiredName {
+				return fmt.Errorf("agent %s: name belongs to a deleted member; use Fleet to confirm name reuse", name)
+			}
+			dirs[dir] = id
 		}
 	}
 	projects := map[string]bool{}
 	ports := map[int]bool{}
+	var discovered []*Member
 	names := map[string]string{}
 	for id, m := range view.Members {
 		if m.Managed && !m.Deleted {
@@ -119,12 +156,23 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 		o := c.Overrides[filepath.Base(dir)]
 		if old != nil {
 			o = Override{Service: old.Service, Project: old.Project, Port: old.Port, Network: old.Network}
+		} else if o.Port == 0 {
+			port, err := fleetDirectoryPort(dir)
+			if err != nil {
+				return fmt.Errorf("agent %s: %w", filepath.Base(dir), err)
+			}
+			o.Port = port
 		}
 		m, err := d.discover(ctx, dir, o)
 		if err != nil {
 			return fmt.Errorf("agent %s: %w", filepath.Base(dir), err)
 		}
 		m.ID, m.Name, m.Managed = id, filepath.Base(dir), true
+		if old == nil {
+			if err = restoreFleetDirectorySettings(m); err != nil {
+				return err
+			}
+		}
 		if old != nil && old.Name != "" {
 			m.Name = old.Name
 		}
@@ -145,6 +193,9 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 		if err = d.checkProject(ctx, m); err != nil {
 			return err
 		}
+		discovered = append(discovered, m)
+	}
+	for _, m := range discovered {
 		host := "0.0.0.0"
 		if m.Network == "host" {
 			host = "127.0.0.1"
@@ -153,15 +204,15 @@ func reconcileFleet(ctx context.Context, c Config, s *Store, mx *Matrix, d *Dock
 		if err != nil {
 			return err
 		}
-		if err = mx.rememberKey(id, key); err != nil {
+		if err = mx.rememberKey(m.ID, key); err != nil {
 			return err
 		}
 		if err = s.Update(func(st *State) error {
-			if prev := st.Members[id]; prev != nil {
+			if prev := st.Members[m.ID]; prev != nil {
 				prev.Managed, prev.Name, prev.Enabled = true, m.Name, true
 				prev.Dir, prev.Home, prev.Project, prev.Service, prev.Port, prev.Network, prev.Files = m.Dir, m.Home, m.Project, m.Service, m.Port, m.Network, m.Files
 			} else {
-				st.Members[id] = m
+				st.Members[m.ID] = m
 			}
 			return nil
 		}); err != nil {

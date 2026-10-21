@@ -19,7 +19,6 @@ import (
 
 type Config struct {
 	PublicURL, ServerName, Admin, Password, Data, Listen, MatrixListen, Assets string
-	Dirs                                                                       []string
 	Overrides                                                                  map[string]Override
 	Idle, Start                                                                time.Duration
 	Parallel                                                                   int
@@ -65,8 +64,8 @@ func loadConfig() (c Config, err error) {
 	c.Data = env("DATA_DIR", "/data")
 	c.FleetDir = os.Getenv("FLEET_DIR")
 	c.TemplateDir = os.Getenv("FLEET_TEMPLATE_DIR")
-	if (c.FleetDir == "") != (c.TemplateDir == "") {
-		return c, errors.New("FLEET_DIR and FLEET_TEMPLATE_DIR must be configured together")
+	if c.FleetDir == "" || c.TemplateDir == "" {
+		return c, errors.New("FLEET_DIR and FLEET_TEMPLATE_DIR are required")
 	}
 	if c.FleetDir != "" {
 		for _, p := range []string{c.FleetDir, c.TemplateDir} {
@@ -109,33 +108,9 @@ func loadConfig() (c Config, err error) {
 			return c, errors.New("HERMES_OVERRIDES must be a JSON object")
 		}
 	}
-	seen := map[string]bool{}
-	for _, p := range strings.Split(os.Getenv("HERMES_DIRS"), ",") {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if !filepath.IsAbs(p) {
-			return c, errors.New("HERMES_DIRS entries must be absolute")
-		}
-		if c.FleetDir == "" {
-			p, e = filepath.EvalSymlinks(p)
-			if e != nil {
-				return c, errors.New("a configured member directory is unavailable")
-			}
-		} else if filepath.Dir(p) != c.FleetDir {
-			return c, errors.New("managed agents must be direct children of FLEET_DIR")
-		}
-		id := filepath.Base(p)
-		if !localpart.MatchString(id) || seen[id] {
-			return c, errors.New("member basenames must be unique lowercase Matrix-safe localparts")
-		}
-		seen[id] = true
-		c.Dirs = append(c.Dirs, p)
-	}
 	for id := range c.Overrides {
-		if !seen[id] {
-			return c, errors.New("HERMES_OVERRIDES names an unconfigured agent")
+		if !fleetName(id) {
+			return c, errors.New("HERMES_OVERRIDES keys must be valid fleet directory names")
 		}
 	}
 	return c, nil
