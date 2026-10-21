@@ -352,7 +352,8 @@ func (m *Matrix) installWidget(ctx context.Context, id, room, address string) er
 		URL  string `json:"url"`
 		Type string `json:"type"`
 	}
-	if e := api(ctx, "GET", m.Base, path, bot.Token, nil, &current, nil); e != nil {
+	// A room without the state event yet is the normal case, not a failure.
+	if e := api(ctx, "GET", m.Base, path, bot.Token, nil, &current, nil); e != nil && !httpStatus(e, 404) {
 		return e
 	}
 	if current.URL == address && current.Type == "m.custom" {

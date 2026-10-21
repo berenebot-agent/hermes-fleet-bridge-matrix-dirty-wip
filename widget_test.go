@@ -187,6 +187,29 @@ func TestWidgetInstallPublishesTheRoomWidget(t *testing.T) {
 	}
 }
 
+func TestWidgetInstallPublishesWhenTheStateEventIsMissing(t *testing.T) {
+	c, s := testStore(t)
+	puts := 0
+	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/state/im.vector.modular.widgets/") {
+			if r.Method == http.MethodPut {
+				puts++
+				replyJSON(w, map[string]string{"event_id": "$widget"})
+				return
+			}
+			// A room that has no widget yet answers 404.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		replyJSON(w, map[string]string{})
+	})
+	e := &Engine{c: c, s: s, mx: mx}
+	e.ensureWidget(context.Background(), "iris", "!iris:chat.test")
+	if puts != 1 {
+		t.Fatalf("missing widget state event was not published: %d", puts)
+	}
+}
+
 func TestWidgetPageAndRoutes(t *testing.T) {
 	e, _ := widgetEngine(t, nil)
 	w := widgetRequest(t, e, "GET", "/widget/fleet", "", "", "")
