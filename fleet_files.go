@@ -464,7 +464,6 @@ func (e *Engine) publishFleetCopy(ctx context.Context, op *FleetOperation, sourc
 		return errors.New("cannot inspect copy destination")
 	}
 	src := ""
-	paused := true
 	if source != nil {
 		src = source.Dir
 	} else {
@@ -473,7 +472,6 @@ func (e *Engine) publishFleetCopy(ctx context.Context, op *FleetOperation, sourc
 			return err
 		}
 		src = filepath.Join(e.c.TemplateDir, tpl.Name)
-		paused = tpl.Kind != "Clean"
 	}
 	// Configuration is resolved by Compose, not by a home-grown YAML parser.
 	var m *Member
@@ -573,8 +571,9 @@ func (e *Engine) publishFleetCopy(ctx context.Context, op *FleetOperation, sourc
 		if _, err = configureEnvKey(filepath.Join(stage, "data", ".env"), host, op.Port, true); err != nil {
 			return err
 		}
-		// Availability is published with the same ownership record, so recovery cannot guess.
-		if err = atomicFile(filepath.Join(stage, ".fleet-availability.json"), jsonBytes(struct{ Paused bool }{paused})); err != nil {
+		// A published agent is ready to receive work. The record travels with the
+		// directory so recovery never has to guess the admission state.
+		if err = atomicFile(filepath.Join(stage, ".fleet-availability.json"), jsonBytes(struct{ Paused bool }{false})); err != nil {
 			return err
 		}
 	}

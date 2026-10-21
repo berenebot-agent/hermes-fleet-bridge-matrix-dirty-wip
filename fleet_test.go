@@ -307,8 +307,8 @@ func TestFleetFullCopySnapshotAndCleanCreation(t *testing.T) {
 	fleetTestCommand(t, e, ctx, "!fleet copy iris to nova")
 	completeFleetTestOperation(t, e, ctx)
 	copy := fleetMember(e.s.View(), "nova")
-	if copy == nil || !copy.Paused || copy.ID == "nova" || copy.Room == source.Room || copy.Port == source.Port {
-		t.Fatal("copy did not get paused, independent identity")
+	if copy == nil || copy.Paused || copy.ID == "nova" || copy.Room == source.Room || copy.Port == source.Port {
+		t.Fatal("copy did not become ready to work with an independent identity")
 	}
 	for _, name := range []string{"memory.md", "history.json", "provider-token"} {
 		if b, err := os.ReadFile(filepath.Join(copy.Home, name)); err != nil || string(b) != "private-fixture" {
@@ -329,8 +329,8 @@ func TestFleetFullCopySnapshotAndCleanCreation(t *testing.T) {
 	}
 	fleetTestCommand(t, e, ctx, "!fleet create lyra from iris-snapshot")
 	completeFleetTestOperation(t, e, ctx)
-	if m := fleetMember(e.s.View(), "lyra"); m == nil || !m.Paused || m.DefaultModel != "copied-model" || len(m.Sessions[m.Room]) != 3 {
-		t.Fatal("snapshot-created agent not paused")
+	if m := fleetMember(e.s.View(), "lyra"); m == nil || m.Paused || m.DefaultModel != "copied-model" || len(m.Sessions[m.Room]) != 3 {
+		t.Fatal("snapshot-created agent not ready to work")
 	}
 	clean := filepath.Join(e.c.TemplateDir, "basic")
 	writeFleetFixture(t, clean, "basic")
@@ -623,8 +623,8 @@ func TestFleetNamePromptCopy(t *testing.T) {
 	}
 	completeFleetTestOperation(t, e, ctx)
 	copy := fleetMember(e.s.View(), "nova")
-	if copy == nil || !copy.Paused {
-		t.Fatal("copied agent missing or not paused")
+	if copy == nil || copy.Paused {
+		t.Fatal("copied agent missing or not ready to work")
 	}
 }
 

@@ -183,7 +183,7 @@ const fleetHelp = `Fleet controls (operator only, in this room):
 Copy agent, Save as template and the template list ask for the new name: reply with
 just the name. An invalid name keeps the prompt alive; !fleet cancel ends it.
 
-Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Full copies and snapshot-created agents start paused. Delete permanently erases agent files, not Matrix history, templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
+Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Copies and agents created from templates start ready to receive work. Delete permanently erases agent files, not Matrix history, templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
 
 func fleetReply(st *State, t *Turn, text string) {
 	m := st.Members[fleetID]

@@ -187,11 +187,12 @@ was running, it is restarted after publication/provisioning succeeds; its previo
 paused/available setting is retained. Failures leave the source guarded until
 retry succeeds, rather than silently resuming while the snapshot is incomplete.
 
-Clean-template agents are available immediately for the first message to wake.
-Full copies and agents created from Full snapshot templates start **paused**.
-Enabling them is an explicit decision: copied schedules, hooks, credentials and
-external-chat integrations may act on the same accounts as the source when run.
-The bridge cannot guarantee safety for activity outside the Hermes API.
+Clean-template agents, full copies and agents created from Full snapshot templates
+all start **ready to receive work**: the first message in the new agent's room
+wakes it. A copy carries the source's schedules, hooks, credentials and
+external-chat integrations, so the copy and the source may act on the same
+accounts once both run. The bridge cannot guarantee safety for activity outside
+the Hermes API.
 
 Copies get a fresh internal identity, Matrix bot/room, Compose project and Hermes
 API key. Their display name is the requested new name; names use up to 40 lowercase
