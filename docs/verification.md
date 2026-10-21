@@ -3,7 +3,36 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
-## Managed Fleet extension — 2026-10-21
+## Default Fleet storage adoption — 2026-10-21
+
+The main Compose deployment now enables Fleet with same-path parent mounts for
+`$PWD/data/fleet` and `$PWD/data/templates` (absolute environment overrides remain
+supported). Removed the redundant optional Compose override and individual member
+mounts. Both default-path and explicit-path Compose configurations were validated
+with fake credentials, including mount identity and no auto-created bind sources.
+The full local race suite passed again (cached; no Go source changed).
+
+The local deployment's three `purple-shirt-*` agents were drained/offline and moved
+from `test-instances/` into `repo/data/fleet/`. Private `.env` and stored member paths
+were updated while the bridge was stopped. Existing agent IDs, Compose project
+names, Matrix rooms and account/API credentials were preserved. Byte comparisons
+against the offline archive confirmed all 1,453 regular agent files were unchanged.
+
+A private consistent backup of bridge state, Matrix storage, account secrets and
+all three agents is retained under
+`data/migration-backups/fleet-20261021T010802Z/`, alongside the original deployment
+environment and Compose file. These files are gitignored, access-restricted and
+contain credentials; do not publish them. A rollback requires a coordinated stopped
+restore, not selectively overwriting live controller state or Matrix storage.
+
+Rebuilt and restarted the single Compose service with `--build`. Live local health
+reported ready, zero held turns, zero blocked replies and zero failed syncs. All
+three agents are managed, available and stopped; the Fleet room exists and the
+operator is joined. Inspection confirmed only the new parent mounts, without old
+per-agent mounts. No provider turn, container wake/copy/delete exercise or destructive
+Matrix cleanup was performed during this adoption.
+
+## Managed Fleet extension, initial implementation — 2026-10-21
 
 Added 17 fake-endpoint Fleet tests: flat single-use menus and initial room menu;
 operator/room restrictions and refused invitations; confirmation expiry; draining

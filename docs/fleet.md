@@ -1,7 +1,7 @@
 # Fleet management
 
-Fleet management is optional and runs inside the existing controller: no new
-service or Go dependency. When enabled, startup provisions a private **Fleet**
+Fleet management is enabled by the default Compose deployment and runs inside
+the existing controller: no new service or Go dependency. Startup provisions a private **Fleet**
 room and joins the configured administrator automatically. Only that exact
 administrator, in that room's main timeline, can invoke fleet controls. Being
 allowed to chat with an agent does not grant fleet-administration permissions.
@@ -11,32 +11,34 @@ allowed to chat with an agent does not grant fleet-administration permissions.
 Back up the stopped bridge and existing member data before changing deployment
 configuration. Do not move running agents or their writable storage.
 
-Create two separate directories owned by `HFB_UID`, preferably under the
-installation's persistent `data/` directory. For the installed layout:
+Create two separate directories owned by `HFB_UID` under the installation's
+persistent `data/` directory. From the installation directory:
 
 ```sh
-mkdir -p /opt/hermes-matrix/data/agents /opt/hermes-matrix/data/templates
-chmod 700 /opt/hermes-matrix/data/agents /opt/hermes-matrix/data/templates
+mkdir -p data/fleet data/templates
+chmod 700 data/fleet data/templates
 ```
 
-Set these in the installation's private `.env`:
+The main Compose file defaults to `$PWD/data/fleet` and `$PWD/data/templates`.
+Run it from the installation directory. Explicit absolute paths in the private
+`.env` override those defaults; for the installed layout:
 
 ```dotenv
-COMPOSE_FILE=docker-compose.yml:docker-compose.fleet.yml
-FLEET_DIR=/opt/hermes-matrix/data/agents
+FLEET_DIR=/opt/hermes-matrix/data/fleet
 FLEET_TEMPLATE_DIR=/opt/hermes-matrix/data/templates
-HERMES_DIRS=/opt/hermes-matrix/data/agents/iris,/opt/hermes-matrix/data/agents/lyra
+HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/lyra
 ```
 
 Use the actual absolute host paths, not `/data`, unless that is genuinely the
-host installation path. The override mounts each parent directory at its same
+host installation path. The main Compose file mounts each parent directory at its same
 absolute host path, so Compose and the host Docker daemon agree on bind sources.
 It refuses to auto-create missing bind sources.
 
 **Remove individual member mounts from your local Compose configuration when
-enabling the parent mount.** Independent mounts at an agent directory, or below
-it, prevent safe deletion and are rejected. The repository's main Compose file
-is unchanged; use the optional override rather than adding a second service.
+using the parent mount.** Independent mounts at an agent directory, or below
+it, prevent safe deletion and are rejected. The former optional
+`docker-compose.fleet.yml` is superseded by the main Compose file; remove any old
+`COMPOSE_FILE` setting that references it.
 
 Each existing agent must be a direct child of `FLEET_DIR`, with its own `data/`
 bound to `/opt/data`. Writable persistent bind sources for **every service** in
@@ -50,7 +52,7 @@ run/idempotency/health APIs, and no Compose environment overrides of the four
 bridge-managed `API_SERVER_*` settings. Initial enrolment uses `HERMES_OVERRIDES`
 where needed; the discovered identity and endpoint are then persisted.
 
-Rebuild/recreate from the installation directory, after configuring the override:
+Rebuild/recreate from the installation directory:
 
 ```sh
 docker compose down && docker compose up -d --build

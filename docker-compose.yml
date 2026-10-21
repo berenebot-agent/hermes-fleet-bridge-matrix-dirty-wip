@@ -24,6 +24,8 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       HERMES_DIRS: ${HERMES_DIRS:-}
       HERMES_OVERRIDES: ${HERMES_OVERRIDES:-}
+      FLEET_DIR: ${FLEET_DIR:-${PWD}/data/fleet}
+      FLEET_TEMPLATE_DIR: ${FLEET_TEMPLATE_DIR:-${PWD}/data/templates}
       IDLE_TIMEOUT: ${IDLE_TIMEOUT:-15m}
       START_TIMEOUT: ${START_TIMEOUT:-120s}
       MAX_PARALLEL_RUNS: ${MAX_PARALLEL_RUNS:-4}
@@ -32,5 +34,15 @@ services:
     volumes:
       - ./data:/data
       - /var/run/docker.sock:/var/run/docker.sock
-      # Add one same-path bind mount per HERMES_DIRS entry, for example:
-      # - /srv/hermes/iris:/srv/hermes/iris
+      # Same-path parent mounts let Fleet create/delete agents without new mounts.
+      # Run Compose from the installation directory, or set both absolute paths in .env.
+      - type: bind
+        source: ${FLEET_DIR:-${PWD}/data/fleet}
+        target: ${FLEET_DIR:-${PWD}/data/fleet}
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FLEET_TEMPLATE_DIR:-${PWD}/data/templates}
+        target: ${FLEET_TEMPLATE_DIR:-${PWD}/data/templates}
+        bind:
+          create_host_path: false

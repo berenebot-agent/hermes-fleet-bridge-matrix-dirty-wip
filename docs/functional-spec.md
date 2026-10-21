@@ -54,7 +54,9 @@ Normal installation layout:
 └── data/
     ├── matrix/
     ├── controller/
-    └── secrets/
+    ├── secrets/
+    ├── fleet/       # one self-contained Compose directory per managed agent
+    └── templates/   # clean and full-snapshot templates
 ```
 
 Operator configuration (see `.env.example` and `README.md` for all settings):
@@ -64,12 +66,12 @@ PUBLIC_URL=https://chat.example.com
 MATRIX_SERVER_NAME=chat.example.com
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=replace-with-strong-secret
-HERMES_DIRS=/srv/hermes/iris,/srv/hermes/hermes-dev,/srv/hermes/hermes-prod
+HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/hermes-dev,/opt/hermes-matrix/data/fleet/hermes-prod
 IDLE_TIMEOUT=15m
 START_TIMEOUT=120s
 ```
 
-Agent membership is defined by a comma-separated list of existing **Docker Compose project directories**, consistent with the Telegram bridge. Mount each directory into the bridge at the *same absolute host path* so relative bind mounts in the member's Compose project resolve correctly. Also mount the Docker socket and durable `./data`.
+Initial agent enrolment uses a comma-separated list of existing **Docker Compose project directories** under `./data/fleet`. Fleet-created members are also persisted in controller state. The main Compose file mounts the fleet and template parents at their *same absolute host paths* so relative member bind mounts resolve correctly; do not mount individual agents separately. It also mounts the Docker socket and durable `./data`. `FLEET_DIR` / `FLEET_TEMPLATE_DIR` can override the default `$PWD/data/fleet` / `$PWD/data/templates` paths.
 
 Allow optional overrides for display name, Compose project/container, network selection and Hermes API port when inference fails. Do not require such overrides in the normal case.
 
@@ -99,13 +101,15 @@ Persist credentials before creating accounts, use deterministic room aliases and
 
 ## 5. Agent discovery, accounts and rooms
 
-Without optional Fleet management, the source of truth is `HERMES_DIRS`, not an incidental list of running containers. Directory basename is the default stable agent ID and room display name.
+When running the controller without Fleet management, the source of truth is `HERMES_DIRS`, not an incidental list of running containers. Directory basename is the default stable agent ID and room display name.
 
 **Managed Fleet extension:** When `FLEET_DIR` and `FLEET_TEMPLATE_DIR` are configured, `HERMES_DIRS` enrols existing members and durable controller state also owns members created through the private operator-only Fleet room. Its compact, flat agent menu supports start, shutdown, pause/enable, full duplication, full-snapshot template saving, creation from clean/full templates and guarded permanent deletion. New identities are independent of reusable display names. All writable agent storage is self-contained under the mounted managed parent; future connected-only membership must not imply deletion authority. Fleet operations drain admitted work, persist progress and fail closed across restart; permanent deletion retains Matrix history. Detailed ownership, confirmations, snapshot semantics, setup and limits are in [fleet.md](fleet.md). Legacy membership-removal behaviour below applies only without this extension.
 
-Managed Fleet is an opt-in addition to the original V1 boundaries below, not a
-replacement for the default existing-directory deployment. It does not add a
-service, dependency, public registration endpoint, or Matrix-history deletion.
+Managed Fleet is enabled by the default Compose deployment, with parent mounts
+for `./data/fleet` and `./data/templates` at their absolute host paths. It extends
+the original V1 boundaries below without adding a service, dependency, public
+registration endpoint, or Matrix-history deletion. Existing-directory deployments
+must migrate their storage/state deliberately before adopting this default.
 
 For each valid project:
 

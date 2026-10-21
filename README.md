@@ -60,6 +60,8 @@ controlled by the bundled Element configuration.
 
 1. **Prepare bridge-managed agents.** Each configured directory must have a normal
    Compose file and an existing `data/` directory bind-mounted at `/opt/data`.
+   Place agents directly under this installation's `data/fleet/` directory;
+   all writable agent storage must stay inside its own agent directory.
    Stop agents before initial enrollment. Their images must already be present;
    the controller never builds or pulls agent images. Use a current Hermes image
    exposing `/v1/runs`, authenticated `/health/detailed`, and durable run
@@ -73,7 +75,7 @@ controlled by the bundled Element configuration.
    ```bash
    cp .env.example .env
    chmod 600 .env
-   install -d -m 700 data
+   install -d -m 700 data data/fleet data/templates
    stat -c %g /var/run/docker.sock
    ```
 
@@ -88,7 +90,7 @@ controlled by the bundled Element configuration.
    ```dotenv
    PUBLIC_URL=https://chat.example.com
    MATRIX_SERVER_NAME=chat.example.com
-   HERMES_DIRS=/srv/hermes/iris,/srv/hermes/lyra
+   HERMES_DIRS=/opt/hermes-matrix/data/fleet/iris,/opt/hermes-matrix/data/fleet/lyra
    HERMES_OVERRIDES={"iris":{"service":"hermes","port":8642}}
    ```
 
@@ -98,15 +100,12 @@ controlled by the bundled Element configuration.
    against existing data fail explicitly; changing them is a migration, not a
    reset. Updating `ADMIN_PASSWORD` never silently resets an existing password.
 
-3. **Add each same-path member bind mount** to `docker-compose.yml`:
-
-   ```yaml
-   volumes:
-     - ./data:/data
-     - /var/run/docker.sock:/var/run/docker.sock
-     - /srv/hermes/iris:/srv/hermes/iris
-     - /srv/hermes/lyra:/srv/hermes/lyra
-   ```
+3. **Use the default parent-directory mounts.** `docker-compose.yml` enables
+   Fleet management and mounts `data/fleet/` and `data/templates/` at their same
+   absolute host paths. Run Compose from the installation directory; defaults
+   use `$PWD`. Set absolute `FLEET_DIR` / `FLEET_TEMPLATE_DIR` in `.env` if needed.
+   Never add individual agent mounts beneath the parent mounts. Existing
+   installations must migrate paths/state while stopped; see [Fleet setup](docs/fleet.md).
 
    The directory basename is the stable agent identity and room name. Basenames
    must be unique lowercase localparts (`a-z`, digits, `_`, `.`, `-`); duplicate
@@ -300,11 +299,11 @@ UTF-8-safe reply chunks; 8 MiB remote JSON responses; 64 MiB controller state;
 recent event IDs remain for deduplication. Hitting a durability/storage safety
 limit stops the controller rather than acknowledging data it cannot persist.
 
-Optional **[Fleet management](docs/fleet.md)** adds a private operator-only room
+Default **[Fleet management](docs/fleet.md)** adds a private operator-only room
 for start/shutdown/pause/enable, clean-template creation, full copies, saved full
 snapshot templates and exact-name-confirmed permanent deletion. All agent actions
-are on one menu, with no More submenu. It uses a managed parent-directory mount
-and an optional Compose override; existing deployments are not silently migrated.
+are on one menu, with no More submenu. It uses managed parent-directory mounts
+in the main Compose file; existing deployments are not silently migrated.
 Matrix history is retained when an agent is deleted.
 
 Without Fleet management, recreate the service after editing membership/mounts. Adding an agent provisions
