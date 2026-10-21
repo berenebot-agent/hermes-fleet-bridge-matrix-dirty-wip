@@ -1,5 +1,46 @@
 # MVP verification
 
+## Room menu widget panel — 2026-10-22
+
+Every room the bridge serves now also carries an HTML menu panel, published as a
+room widget (`im.vector.modular.widgets`). The panel renders the room's open
+menu as buttons, and a press queues the same menu turn a reaction tap queues, so
+the reaction menu and the panel run one code path. The reaction menu is
+unchanged and remains the primary control: Element X and other clients without
+widget support never see the panel.
+
+The panel is authorised by a per-room token carried in the widget URL fragment,
+so it never reaches a proxy log and is readable only by room members. A press
+sends the pressing user's own access token, the bridge verifies it against the
+homeserver, and the menu's owner must match: a member can only act on a menu
+they opened.
+
+- `gofmt -l .` passed (final formatting gate): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T182235-go-gofmt_-l_.-3555961.log`.
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T182236-go-vet_._...-3556129.log`.
+- `go test -race -count=1 ./...` passed (29.462s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T182238-go-test_-race_-count=1_._...-3556302.log`.
+- New fake-endpoint coverage in `widget_test.go`: the panel lists the open menu
+  and refuses an unknown room token; a press queues a menu turn with the right
+  owner and choice and consumes the menu when it runs; a press by another
+  member, without an access token, on a closed menu or with an unknown token is
+  refused and queues nothing; the room widget is published once with the room
+  and its token in the URL; the panel is served with a content policy and is
+  refused before the bridge is ready.
+- **Live spike on the running deployment.** The `im.vector.modular.widgets`
+  state event was written to the live Fleet room with an authenticated bot
+  token, read back, and then removed again (empty content), leaving the room as
+  it was. Tuwunel 1.9.2 accepted the event, and the room creator may send it,
+  so the bridge publishes the panel itself. Element Web 1.12.13 renders widgets
+  from this state event in the room's right-panel *Extensions* card; it does not
+  support the `m.widget` message event type, which is why the panel is a room
+  widget rather than a card in the timeline.
+- **Not established by these checks.** A press has not been exercised in a real
+  Element Web session, and Element X behaviour is unchanged by design. The
+  panel's first paint, its two-second refresh and a press against a live agent
+  still need a browser acceptance pass.
+
 ## Silent container-lifecycle notices — 2026-10-22
 
 Container start/ready/stop notices are now delivered as `m.notice` instead of

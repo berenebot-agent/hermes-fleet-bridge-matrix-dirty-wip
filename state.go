@@ -67,6 +67,9 @@ type Room struct {
 	Revision  uint64
 	// HideTools suppresses the agent's tool-call summaries in this room.
 	HideTools bool
+	// WidgetToken authorises the room's widget panel. The widget URL carries it, so it is
+	// readable only by room members.
+	WidgetToken string
 }
 type Session struct {
 	ID, Model, Provider string

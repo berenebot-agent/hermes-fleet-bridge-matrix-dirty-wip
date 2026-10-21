@@ -145,6 +145,12 @@ confirmation, not deletion. Reactions are single-use and bound to the operator,
 room and stored agent identity. An old menu cannot target a new agent reusing an
 old name.
 
+The same menu is also shown as a widget panel in the Fleet room: open the room's
+**Extensions** card in Element's right panel and the open menu appears as
+buttons. A press runs exactly what the matching reaction runs, so the panel and
+the reaction menu never disagree. Element X and other clients without widget
+support keep using the reaction menu.
+
 Commands:
 
 ```text

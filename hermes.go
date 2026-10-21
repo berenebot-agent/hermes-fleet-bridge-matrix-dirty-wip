@@ -23,6 +23,9 @@ type Engine struct {
 	mediaMu  sync.Mutex
 	agentsMu sync.Mutex
 	fleetMu  sync.Mutex
+	// widgetMu guards widgets, the rooms whose widget panel is already published.
+	widgetMu sync.Mutex
+	widgets  map[string]bool
 }
 type agentRuntime struct {
 	mu          sync.Mutex
@@ -586,6 +589,11 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	m := e.s.View().Members[id]
 	if m.Deleted {
 		return
+	}
+	// Every room the agent serves carries a widget panel that renders its menus. The install
+	// is a room-lifecycle step, so it happens here rather than inside a command.
+	for room := range m.Rooms {
+		e.ensureWidget(ctx, id, room)
 	}
 	rt.mu.Lock()
 	if rt.controls == nil {

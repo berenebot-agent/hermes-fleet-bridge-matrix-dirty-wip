@@ -21,7 +21,9 @@ type Menu struct {
 	Revision                      uint64
 	Created                       time.Time
 	Used                          bool
-	Options                       []MenuOption
+	// Title is the menu heading, shared by the reaction message and the widget panel.
+	Title   string
+	Options []MenuOption
 }
 
 type MenuOption struct {
@@ -65,6 +67,21 @@ func menuValid(m *Member, menu *Menu) bool {
 		menu.Revision == r.Revision && menu.Session == selectedKey(m, menu.Room)
 }
 
+// currentMenu is the room's newest menu that is still open. The widget panel renders exactly
+// this menu, so the reaction message and the panel always offer the same choices.
+func currentMenu(m *Member, room string) (string, *Menu) {
+	key, best := "", (*Menu)(nil)
+	for k, menu := range m.Menus {
+		if menu == nil || menu.Room != room || !menuValid(m, menu) {
+			continue
+		}
+		if best == nil || menu.Created.After(best.Created) || (menu.Created.Equal(best.Created) && k > key) {
+			key, best = k, menu
+		}
+	}
+	return key, best
+}
+
 func postMenu(m *Member, id, room, owner, title string, options []MenuOption, replace bool) {
 	if r := m.Rooms[room]; r == nil || r.Space {
 		return
@@ -106,7 +123,7 @@ func postMenu(m *Member, id, room, owner, title string, options []MenuOption, re
 		text += "\n" + options[i].Key + " " + options[i].Label
 	}
 	text += "\nTap a reaction below. Menus are single-use; !menu opens fresh controls."
-	m.Menus[id] = &Menu{Room: room, Owner: owner, Session: selectedKey(m, room), Revision: m.Rooms[room].Revision, Created: time.Now().UTC(), Options: options}
+	m.Menus[id] = &Menu{Room: room, Owner: owner, Session: selectedKey(m, room), Revision: m.Rooms[room].Revision, Created: time.Now().UTC(), Title: title, Options: options}
 	addNotice(m, id, room, "", text)
 	m.Outbox[len(m.Outbox)-1].MenuID = id
 }

@@ -340,6 +340,40 @@ func (m *Matrix) grantAdmin(ctx context.Context, room, token, user string) error
 	return api(ctx, "PUT", m.Base, roomPath(room)+"/state/m.room.power_levels/", token, levels, nil, nil)
 }
 
+// installWidget publishes the room's widget panel. Element Web renders a widget from the
+// im.vector.modular.widgets state event, and the room creator may send that event.
+func (m *Matrix) installWidget(ctx context.Context, id, room, address string) error {
+	bot := m.cred("agent_" + id)
+	if bot.Token == "" {
+		return errors.New("bot credentials unavailable")
+	}
+	path := roomPath(room) + "/state/im.vector.modular.widgets/" + widgetStateKey
+	var current struct {
+		URL  string `json:"url"`
+		Type string `json:"type"`
+	}
+	if e := api(ctx, "GET", m.Base, path, bot.Token, nil, &current, nil); e != nil {
+		return e
+	}
+	if current.URL == address && current.Type == "m.custom" {
+		return nil
+	}
+	content := map[string]any{
+		"type": "m.custom", "url": address, "name": widgetName,
+		"data": map[string]any{"preferredSize": map[string]string{"width": "100%", "height": "360px"}},
+	}
+	var r struct {
+		ID string `json:"event_id"`
+	}
+	if e := api(ctx, "PUT", m.Base, path, bot.Token, content, &r, nil); e != nil {
+		return e
+	}
+	if r.ID == "" {
+		return errors.New("widget state event returned no event ID")
+	}
+	return nil
+}
+
 // purgeRoom erases a deleted agent's own room. Tuwunel evicts every local member
 // (so the room leaves the operator's room list), removes the room's local aliases
 // and purges its stored events, so the agent's Matrix history is erased rather than

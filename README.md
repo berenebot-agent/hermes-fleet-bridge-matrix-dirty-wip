@@ -288,6 +288,13 @@ Removing a reaction does not undo an action. Duplicate delivery cannot repeat a
 completed local choice. Menus/reaction chips use the durable reply outbox and
 stable Matrix transaction IDs; `!resend` also retries blocked menu delivery.
 
+The same open menu is also published as a room widget panel, so Element Web can
+show it as buttons in the room's **Extensions** card. A press queues the same
+menu turn a reaction tap queues, so both surfaces agree. The panel is per room,
+authorised by a token only room members can read, and a press counts as the
+pressing user, so only the person who opened a menu can act on it. Clients
+without widget support ignore the panel and keep the reaction menu.
+
 Unsupported commands never pretend to succeed or become agent instructions.
 Unrelated reactions, edits and unsupported event types do not wake agents.
 An authorized menu choice can wake an agent only for a control that needs its API.

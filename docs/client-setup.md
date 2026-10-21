@@ -25,3 +25,16 @@ before adding the account again if necessary.
 For unreadable encrypted messages, keep a verified device signed in, verify the
 affected session and check recovery. Do not disable key storage or repeatedly
 reset identities to hide warnings: that can permanently lose encrypted history.
+
+## Room menu panel
+
+Every room the bridge serves — agent rooms and the Fleet room — also carries an
+HTML menu panel, published as a room widget. Open it from the room's
+**Extensions** card in Element Web's right panel. It shows the open menu as
+buttons, and a press does what the matching reaction chip does.
+
+The panel needs no extra setup and no separate login: it runs inside Element and
+uses the session you are already signed in with. Clients without widget support
+(Element X and other apps) do not show the panel and keep the reaction menu, so
+nothing is lost by using either surface. The panel is authorised per room, and
+only the person who opened a menu can act on it.

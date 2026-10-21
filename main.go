@@ -43,6 +43,7 @@ func run(ctx context.Context) error {
 	}
 	defer mx.closeCrypto()
 	d := newDocker()
+	engine := &Engine{c: c, s: s, mx: mx, docker: d, agents: map[string]*agentRuntime{}}
 	startup, stopStartup := context.WithTimeout(ctx, 2*time.Minute)
 	err = reconcileFleet(startup, c, s, mx, d)
 	stopStartup()
@@ -71,7 +72,7 @@ func run(ctx context.Context) error {
 	workCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var ready atomic.Bool
-	server := &http.Server{Addr: c.Listen, Handler: frontend(c, s, &ready), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	server := &http.Server{Addr: c.Listen, Handler: engine.widgetRoutes(&ready, frontend(c, s, &ready)), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 32 << 10, ErrorLog: log.New(io.Discard, "", 0)}
 	serverErrors := make(chan error, 1)
 	go func() { serverErrors <- server.ListenAndServe() }()
 	defer func() {
@@ -110,7 +111,6 @@ func run(ctx context.Context) error {
 			}
 		}
 	}
-	engine := &Engine{c: c, s: s, mx: mx, docker: d, agents: map[string]*agentRuntime{}}
 	engine.Start(workCtx)
 	defer func() { ready.Store(false); cancel(); engine.wg.Wait() }()
 	ready.Store(true)

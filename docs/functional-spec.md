@@ -270,7 +270,7 @@ upgrade is re-checked against it.
 The MVP uses plain-text `!` commands because clients can intercept `/` commands. Those commands were delivered through Matrix in the integration checks. Status/cancellation/approvals are processed outside the blocked turn queue, and queued controls form a barrier before further dispatch in that conversation.
 
 Reaction menus target Element X mobile and bundled Element Web desktop without
-client or homeserver modifications, widgets, type-ahead or modal dialogs. The bot
+client or homeserver modifications, type-ahead or modal dialogs. The bot
 seeds numbered reaction chips; lists have five choices plus previous/next/cancel.
 Choices are single-use and bound to the opener, room, selected conversation and
 relevant settings revision. Stale choices are refused; menus/action intent and
@@ -279,6 +279,15 @@ remain usable when navigation changes, but are bound to the originating sender,
 turn and exact pending request, reverified over the authenticated API before
 approve-once/deny. Reaction removal does not undo actions. Retain direct controls
 as fallback; no native command dispatch by sending command text as a model prompt.
+
+The same open menu is also published as a room widget panel
+(`im.vector.modular.widgets`) in every room the bridge serves, the Fleet room
+included. The panel renders the open menu as buttons, and a press queues the same
+menu turn a reaction tap queues, so both surfaces run one code path. The panel is
+a web-client surface: clients without widget support keep the reaction menu, which
+stays the primary control. The panel is authorised by a per-room token carried in
+the widget URL, and a press is attributed to the pressing user, so a member can
+only act on a menu they opened.
 
 Bound storage to 200 recent/pending menus per agent and 1,000 sessions per room;
 navigation menus expire after 24 hours, and closed-menu records can be evicted to
