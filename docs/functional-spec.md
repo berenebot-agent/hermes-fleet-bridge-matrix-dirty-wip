@@ -75,7 +75,7 @@ Initial agent enrolment uses a comma-separated list of existing **Docker Compose
 
 Allow optional overrides for display name, Compose project/container, network selection and Hermes API port when inference fails. Do not require such overrides in the normal case.
 
-On first start validate public hostname, administrator credentials, mounted directories, Docker/Compose access, and secure storage permissions. Reject invalid configuration explicitly. `MATRIX_SERVER_NAME` is Compose/.env-defined and must match the public URL hostname in this MVP. Persist the initial identity, origin and administrator name; refuse mismatches after bootstrap rather than renaming/resetting accounts.
+On first start validate public hostname, administrator credentials, mounted directories, Docker/Compose access, and secure storage permissions. Reject invalid configuration explicitly. `MATRIX_SERVER_NAME` is the durable Compose/.env-defined Matrix identity; it need not match the `PUBLIC_URL` hostname. Persist the identity, origin and administrator name. Refuse server-identity/administrator-name changes after bootstrap, but reconcile valid HTTPS public-origin changes without replacing data. An explicit `ADMIN_PASSWORD` change updates the existing administrator through the private authenticated password-reset API, revokes its devices and verifies the desired login before saving the new credential. Restart recovery first tries the desired login to recognize a remotely applied change without repeating it. See [config-changes.md](config-changes.md).
 
 ## 4. Completely automated bootstrap
 
@@ -93,7 +93,7 @@ When `./data` is empty, the entrypoint/controller must:
 10. Save stable mappings, room IDs, event offsets, credentials and queue state with safe filesystem permissions.
 11. Mark the application ready only when the user can actually log in and see the agent rooms.
 
-On every subsequent startup, reconcile missing accounts, rooms and invitations **idempotently**. Do not reset histories, reset passwords, duplicate rooms, rotate working credentials unnecessarily, or overwrite unrelated Hermes configuration. Pending invitations are reconciled once per start, because an incrementing sync only reports an invite relative to its stored cursor.
+On every subsequent startup, reconcile missing accounts, rooms and invitations **idempotently**. Do not reset histories, duplicate rooms, rotate working credentials unnecessarily, or overwrite unrelated Hermes configuration. Only an explicit `ADMIN_PASSWORD` change authorizes updating the administrator's password; bot credentials are not rotated. Pending invitations are reconciled once per start, because an incrementing sync only reports an invite relative to its stored cursor.
 
 Persist credentials before creating accounts, use deterministic room aliases and ownership state to recover a creation whose local mapping was not saved, and prefer an existing persisted room ID over alias lookup. A missing/deleted existing room fails closed; its history is never silently replaced. Missing controller state or secrets beside an existing homeserver database requires a consistent restore, not fresh bootstrap.
 

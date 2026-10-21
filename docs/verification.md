@@ -3,6 +3,36 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
+## Public-URL and administrator-password reconciliation — 2026-10-21
+
+Public HTTPS origin changes now update controller metadata atomically while keeping
+the Matrix server name and administrator identity fixed. Element/client discovery
+advertise the new origin independently of the durable Matrix server name.
+Administrator password changes use Tuwunel 1.9.2's authenticated private reset
+route, verify the desired login and persist it only after verification; reset
+requests revoke the administrator's devices, not bot credentials. The route's
+support was checked in pinned source
+`src/api/client/admin/users/reset_password.rs`.
+
+The full local `test -race ./...` suite, `go vet`, formatting gate and rebuilt Docker
+image passed. Added tests cover durable URL changes without altering work/rooms,
+refused server/username renames, discovery configuration, and ten password cases:
+valid/expired tokens, already-applied changes, lost reset responses, interrupted
+verification, rejected resets, wrong identity, failed secrets writes, unchanged
+settings and untouched bot credentials. Interrupted changes are recovered without
+issuing a second reset. Fake error bodies containing credentials are not surfaced.
+
+Recreated the local deployment after a consistent private backup at
+`data/migration-backups/config-20261021T015733Z/`. Restored the original immutable
+Matrix server name in the private environment while retaining the requested new
+`PUBLIC_URL`. Local health is ready with zero holds, blocked replies or failed
+syncs. Existing account identities/passwords, API keys and all agent/Fleet room
+mappings match the backup, and the current administrator session was verified
+against the private homeserver. No live password was changed and no provider turn
+was sent. The public HTTPS check timed out from this host; proxy/DNS/TLS reachability
+is not claimed as verified. Operational details are in
+[config-changes.md](config-changes.md).
+
 ## Default Fleet storage adoption — 2026-10-21
 
 The main Compose deployment now enables Fleet with same-path parent mounts for

@@ -102,8 +102,8 @@ func TestConfiguration(t *testing.T) {
 	}
 	t.Setenv("PUBLIC_URL", "https://chat.test")
 	t.Setenv("MATRIX_SERVER_NAME", "other.test")
-	if _, err := loadConfig(); err == nil {
-		t.Fatal("identity mismatch accepted")
+	if c, err := loadConfig(); err != nil || c.ServerName != "other.test" || c.PublicURL != "https://chat.test" {
+		t.Fatal("separate public origin and Matrix identity rejected")
 	}
 	t.Setenv("MATRIX_SERVER_NAME", "chat.test")
 	// A mixed-case ADMIN_USERNAME is normalised, not refused: the homeserver lowercases

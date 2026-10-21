@@ -48,9 +48,6 @@ func loadConfig() (c Config, err error) {
 	}
 	c.PublicURL = strings.TrimSuffix(c.PublicURL, "/")
 	c.ServerName = env("MATRIX_SERVER_NAME", u.Hostname())
-	if c.ServerName != u.Hostname() {
-		return c, errors.New("MATRIX_SERVER_NAME must match the PUBLIC_URL hostname in this single-origin MVP")
-	}
 	if !regexp.MustCompile(`^[a-z0-9][a-z0-9.-]*[a-z0-9]$`).MatchString(c.ServerName) || strings.Contains(c.ServerName, "..") {
 		return c, errors.New("MATRIX_SERVER_NAME must be a lowercase DNS hostname")
 	}

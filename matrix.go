@@ -84,18 +84,6 @@ func (m *Matrix) account(ctx context.Context, name string, admin bool) (Credenti
 			return Credential{}, e
 		}
 	}
-	if a.Token != "" {
-		var who struct {
-			User string `json:"user_id"`
-		}
-		e := api(ctx, "GET", m.Base, "/_matrix/client/v3/account/whoami", a.Token, nil, &who, nil)
-		if e == nil && who.User == a.User {
-			return *a, nil
-		}
-		if e != nil && !httpStatus(e, 401) {
-			return Credential{}, e
-		}
-	}
 	login := func(password string) error {
 		var r struct {
 			Token string `json:"access_token"`
@@ -111,12 +99,71 @@ func (m *Matrix) account(ctx context.Context, name string, admin bool) (Credenti
 		}
 		return e
 	}
+	verify := func() error {
+		var who struct {
+			User string `json:"user_id"`
+		}
+		if e := api(ctx, "GET", m.Base, "/_matrix/client/v3/account/whoami", a.Token, nil, &who, nil); e != nil {
+			return e
+		}
+		if who.User != a.User {
+			return errors.New("Matrix authenticated identity mismatch")
+		}
+		return nil
+	}
+	if admin && a.Password != m.c.Password {
+		previous := *a
+		saved := false
+		defer func() {
+			if !saved {
+				*a = previous
+			}
+		}()
+		// Try the desired login first: the remote change may have survived a lost response/restart.
+		if e := login(m.c.Password); e != nil {
+			if !httpStatus(e, 401) && !httpStatus(e, 403) && !httpStatus(e, 404) {
+				return Credential{}, errors.New("administrator password reconciliation unavailable; private credentials retained")
+			}
+			var proof error
+			if a.Token != "" {
+				proof = verify()
+			}
+			if a.Token == "" || httpStatus(proof, 401) {
+				proof = login(previous.Password)
+				if proof == nil {
+					proof = verify()
+				}
+			}
+			if proof != nil {
+				return Credential{}, errors.New("cannot authenticate existing administrator for password change; private credentials retained")
+			}
+			// Verification, not the reset response, decides success when a response is lost.
+			_ = api(ctx, "POST", m.Base, "/_synapse/admin/v1/reset_password/"+url.PathEscape(a.User), a.Token, map[string]any{"new_password": m.c.Password, "logout_devices": true}, nil, nil)
+			if e = login(m.c.Password); e != nil {
+				return Credential{}, errors.New("administrator password change could not be verified; private credentials retained, retry with the same ADMIN_PASSWORD")
+			}
+		}
+		if verify() != nil {
+			return Credential{}, errors.New("new administrator login could not be verified; retry with the same ADMIN_PASSWORD")
+		}
+		if e := m.saveSecrets(); e != nil {
+			return Credential{}, e
+		}
+		saved = true
+		return *a, nil
+	}
+	if a.Token != "" {
+		e := verify()
+		if e == nil {
+			return *a, nil
+		}
+		if !httpStatus(e, 401) {
+			return Credential{}, e
+		}
+	}
 	e := login(a.Password)
 	if e != nil && !httpStatus(e, 403) && !httpStatus(e, 404) {
 		return Credential{}, e
-	}
-	if e != nil && admin && a.Password != m.c.Password {
-		e = login(m.c.Password)
 	}
 	if e != nil {
 		var nonce struct {
@@ -133,7 +180,7 @@ func (m *Matrix) account(ctx context.Context, name string, admin bool) (Credenti
 		h.Write([]byte(strings.Join([]string{nonce.Nonce, name, a.Password, role}, "\x00")))
 		e = api(ctx, "POST", m.Base, "/_synapse/admin/v1/register", "", map[string]any{"nonce": nonce.Nonce, "username": name, "password": a.Password, "admin": admin, "mac": hex.EncodeToString(h.Sum(nil))}, nil, nil)
 		if e != nil {
-			return Credential{}, errors.New("account provisioning failed; existing passwords are never reset")
+			return Credential{}, errors.New("account provisioning failed; registration never overwrites an existing account")
 		}
 		if e = login(a.Password); e != nil {
 			return Credential{}, errors.New("provisioned account login failed")

@@ -259,9 +259,9 @@ func openStore(c Config) (*Store, error) {
 		f.Close()
 		return nil, errors.New("controller state unreadable or corrupt; restore a consistent backup, do not delete state")
 	}
-	if s.state.Version != stateVersion || s.state.ServerName != c.ServerName || s.state.PublicURL != c.PublicURL || s.state.Admin != c.Admin || s.state.Members == nil {
+	if s.state.Version != stateVersion || s.state.ServerName != c.ServerName || s.state.Admin != c.Admin || s.state.Members == nil {
 		f.Close()
-		return nil, errors.New("state identity/version differs from configuration; refuse reset or rename")
+		return nil, errors.New("state identity/version differs from configuration; restore the original MATRIX_SERVER_NAME and ADMIN_USERNAME (only PUBLIC_URL and ADMIN_PASSWORD may change)")
 	}
 	if s.state.FleetDir != "" && (s.state.FleetDir != c.FleetDir || s.state.TemplateDir != c.TemplateDir) {
 		f.Close()
@@ -348,6 +348,10 @@ func openStore(c Config) (*Store, error) {
 				return nil, errors.New("invalid attachment outbox; restore a consistent backup")
 			}
 		}
+	}
+	if s.state.PublicURL != c.PublicURL {
+		s.state.PublicURL = c.PublicURL
+		migrated = true
 	}
 	if migrated {
 		if e = atomicFile(s.path, jsonBytes(s.state)); e != nil {

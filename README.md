@@ -94,11 +94,13 @@ controlled by the bundled Element configuration.
    HERMES_OVERRIDES={"iris":{"service":"hermes","port":8642}}
    ```
 
-   `MATRIX_SERVER_NAME` is Compose/environment-defined, not hardcoded. In this
-   single-origin MVP it must match the public URL's hostname. **Choose the final
-   hostname before bootstrap.** Identity, URL and administrator-name changes
-   against existing data fail explicitly; changing them is a migration, not a
-   reset. Updating `ADMIN_PASSWORD` never silently resets an existing password.
+   `MATRIX_SERVER_NAME` is the durable Matrix identity, not necessarily the website
+   address. **Keep it unchanged after bootstrap.** `PUBLIC_URL` can move to another
+   HTTPS origin without replacing accounts, rooms, history or agent sessions.
+   Changing `ADMIN_PASSWORD` updates the existing administrator through the private
+   authenticated API, logs out its devices, verifies the new login and saves it.
+   Server-identity and administrator-username changes still fail closed. See
+   [URL and password changes](docs/config-changes.md) before editing those settings.
 
 3. **Use the default parent-directory mounts.** `docker-compose.yml` enables
    Fleet management and mounts `data/fleet/` and `data/templates/` at their same
