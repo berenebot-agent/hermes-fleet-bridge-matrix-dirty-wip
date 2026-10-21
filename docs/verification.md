@@ -3,6 +3,21 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
+## Fleet name prompt — 2026-10-21
+
+Copy agent, Save as template and the template list now ask for the destination
+name: the operator replies with a plain message instead of editing a command.
+Seven fake-endpoint tests cover the prompt copy, create-from-template,
+invalid-name recovery, expiry, cancellation, refusal while a delete confirmation
+is pending, and plain text being admitted only while a prompt is pending.
+
+The Fleet room still admits only `!` commands otherwise, and only the configured
+administrator's messages are considered. The prompt and the typed command share
+one validation and start path, so both apply the same name rules, in-use check,
+deleted-name reuse confirmation and template-exists check. `!fleet cancel` clears
+the prompt. A pending prompt is dropped on restart, which is safe: the operator
+simply taps the action again.
+
 ## Container lifecycle notices — 2026-10-21
 
 The agent's own room now reports container lifecycle: it announces the Compose

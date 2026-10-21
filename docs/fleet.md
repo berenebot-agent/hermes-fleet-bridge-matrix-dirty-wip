@@ -91,10 +91,23 @@ Fleet
 └── Help
 ```
 
-All agent actions are top-level; there is no More submenu. Copy and Save show
-command examples for entering the destination name. Delete starts a confirmation,
-not deletion. Reactions are single-use and bound to the operator, room and stored
-agent identity. An old menu cannot target a new agent reusing an old name.
+All agent actions are top-level; there is no More submenu. Copy, Save as template
+and the template list **ask for the new name**: the bridge posts
+
+```text
+Copy purple-shirt-1 → reply with the new agent name.
+(or: !fleet copy purple-shirt-1 to <new-name>)
+Cancels with !fleet cancel · expires in 5 minutes
+```
+
+and the operator replies with just the name. An invalid name is explained and the
+prompt stays alive, so a typo costs one message; `!fleet cancel` ends it. The
+equivalent command still works and is shown as a fallback. Only the operator can
+answer, thread replies are refused, and a pending confirmation blocks a new
+prompt, so exactly one interaction is outstanding at a time. Delete starts a
+confirmation, not deletion. Reactions are single-use and bound to the operator,
+room and stored agent identity. An old menu cannot target a new agent reusing an
+old name.
 
 Commands:
 
@@ -113,6 +126,9 @@ Commands:
 !fleet cancel
 !fleet retry
 ```
+
+A plain reply in this room is ignored unless a name prompt is pending, so the
+room stays quiet during normal use.
 
 - **Start:** explicitly wake an available agent; does not bypass Pause. The
   normal idle timer applies after startup.
@@ -250,5 +266,8 @@ implemented.
 Tests use fake Compose, Docker, Matrix and Hermes endpoints. They cover flat
 menus, operator/room restrictions, confirmation expiry, drain/health safety,
 pause persistence, credential separation, clean/full creation, snapshot retries,
-publication and deletion crash recovery, name reuse, and storage/mount boundaries.
-They do not operate on a real fleet, provider or homeserver.
+publication and deletion crash recovery, name reuse, storage/mount boundaries,
+and the name prompt: copy, create-from-template, invalid-name recovery, expiry,
+cancellation, refusal while a confirmation is pending, and plain text being
+admitted only while a prompt is pending. They do not operate on a real fleet,
+provider or homeserver.

@@ -15,6 +15,14 @@ import (
 
 const fleetID = "fleet-controller"
 
+// Name prompts ask the operator for a destination name; the answer is their next
+// plain message in the Fleet room.
+const (
+	promptCopy     = "prompt-copy"
+	promptTemplate = "prompt-template"
+	promptCreate   = "prompt-create"
+)
+
 var errDeactivationUnavailable = errors.New("Matrix account deactivation unconfirmed")
 
 type FleetConfirmation struct {
@@ -169,8 +177,11 @@ const fleetHelp = `Fleet controls (operator only, in this room):
 !fleet copy <agent> to <name>
 !fleet save-template <agent> as <template>
 !fleet delete <agent>
-!fleet cancel — cancel a waiting operation or confirmation
+!fleet cancel — cancel a waiting operation, confirmation or name prompt
 !fleet retry — retry a held operation after fixing the reported problem
+
+Copy agent, Save as template and the template list ask for the new name: reply with
+just the name. An invalid name keeps the prompt alive; !fleet cancel ends it.
 
 Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Full copies and snapshot-created agents start paused. Delete permanently erases agent files, not Matrix history, templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
 
@@ -216,13 +227,18 @@ func fleetMenu(st *State, t *Turn, action, value, extra string) {
 			{Label: "Refresh status", Action: "status", Value: value},
 			{Label: "Start", Action: "start", Value: value},
 			{Label: "Shutdown", Action: "shutdown", Value: value}, availability,
-			{Label: "Copy agent", Action: "copy-help", Value: value},
-			{Label: "Save as template", Action: "save-help", Value: value},
+			{Label: "Copy agent", Action: promptCopy, Value: value},
+			{Label: "Save as template", Action: promptTemplate, Value: value},
 			{Label: "Delete", Action: "delete", Value: value},
 			{Label: "Back", Action: "home"},
 		}
 	case "template":
-		fleetReply(st, t, "Create from template:\n!fleet create <new-name> from "+value+"\nClean agents are available immediately; full snapshots start paused.")
+		tpl, err := readFleetTemplate(extra, value)
+		if err != nil {
+			fleetReply(st, t, err.Error())
+			return
+		}
+		fleetStartPrompt(st, t, promptCreate, tpl.Name, "Create from "+tpl.Name+" → reply with the new agent name.", "!fleet create <new-name> from "+tpl.Name)
 		return
 	default:
 		options = []MenuOption{{Label: "Agents", Action: "agents"}, {Label: "Templates", Action: "templates"}, {Label: "Help", Action: "help"}}
@@ -266,6 +282,11 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 		return
 	}
 	t = findTurn(e.s.View().Members[fleetID], turn)
+	// A plain reply is only meaningful as the answer to a pending name prompt.
+	if t.Kind != "command" {
+		e.fleetPromptAnswer(turn)
+		return
+	}
 	f := strings.Fields(t.Text)
 	action, value, name := "home", "", ""
 	if t.Selection != nil {
@@ -335,6 +356,18 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			}
 			fleetReply(st, t, text+"\nFull copy, including private data and provider credentials. Source work drains before a stopped snapshot.")
 			return nil
+		case promptCopy, promptTemplate:
+			a := st.Members[value]
+			if a == nil || a.Deleted || !a.Managed {
+				fleetReply(st, t, "Agent is no longer available.")
+				return nil
+			}
+			if action == promptCopy {
+				fleetStartPrompt(st, t, promptCopy, a.ID, "Copy "+agentName(a)+" → reply with the new agent name.", "!fleet copy "+agentName(a)+" to <new-name>")
+			} else {
+				fleetStartPrompt(st, t, promptTemplate, a.ID, "Save "+agentName(a)+" as a template → reply with the template name.", "!fleet save-template "+agentName(a)+" as <template-name>")
+			}
+			return nil
 		case "cancel":
 			if op := st.FleetOperation; op != nil {
 				if op.Stage != "waiting" {
@@ -347,6 +380,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 				st.FleetOperation = nil
 			}
 			st.FleetConfirmation = nil
+			st.FleetPrompt = nil
 			fleetReply(st, t, "Pending operation/confirmation cancelled.")
 			return nil
 		case "retry":
@@ -394,25 +428,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			return nil
 		}
 		if action == "create" {
-			if !fleetName(value) || fleetMember(*st, value) != nil {
-				fleetReply(st, t, "Choose an unused lowercase agent name (letters, digits, dots, dashes or underscores; up to 40 characters).")
-				return nil
-			}
-			tpl, err := readFleetTemplate(e.c.TemplateDir, name)
-			if err != nil {
-				fleetReply(st, t, err.Error())
-				return nil
-			}
-			id := value + "-" + randomSecret()[:12]
-			for _, old := range st.Members {
-				if old.Deleted && agentName(old) == value {
-					cf := &FleetConfirmation{Action: "create", Name: value, Source: tpl.Name, Target: id, Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
-					st.FleetConfirmation = cf
-					fleetReply(st, t, "Warning: this name belonged to a deleted agent. Its old Matrix rooms/history remain. The replacement gets a fresh identity and room. Confirm within five minutes:\n!fleet confirm-create "+value+" "+cf.Code)
-					return nil
-				}
-			}
-			startFleetOperation(st, t, "create", name, value, id, nextFleetPort(*st))
+			e.fleetBeginNamed(st, t, "create", name, nil, value)
 			return nil
 		}
 		a := st.Members[value]
@@ -427,6 +443,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 		case "delete":
 			cf := &FleetConfirmation{Action: "delete", Target: a.ID, Name: agentName(a), Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
 			st.FleetConfirmation = cf
+			st.FleetPrompt = nil
 			fleetReply(st, t, "Permanently delete "+cf.Name+"?\nErase this agent's containers and managed directory, including files, memories, history and credentials. Drain admitted work first; never force-kill. Retain Matrix rooms/messages, saved templates, other copies and shared images. Remove from Fleet menus and attempt Matrix account deactivation.\nConfirm within five minutes:\n!fleet confirm-delete "+cf.Name+" "+cf.Code+"\n!fleet cancel to cancel.")
 		case "enable":
 			a.Paused = false
@@ -438,31 +455,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			}
 			startFleetOperation(st, t, action, a.ID, "", "", 0)
 		case "copy", "save-template":
-			if !fleetName(name) {
-				fleetReply(st, t, "Invalid destination name; use up to 40 lowercase letters, digits, dots, dashes or underscores.")
-				return nil
-			}
-			if action == "copy" && fleetMember(*st, name) != nil {
-				fleetReply(st, t, "Agent name is already in use.")
-				return nil
-			}
-			if action == "save-template" {
-				if _, err := os.Lstat(filepath.Join(e.c.TemplateDir, name)); !os.IsNotExist(err) {
-					fleetReply(st, t, "Template destination already exists or is unavailable; templates are never overwritten.")
-					return nil
-				}
-			}
-			if action == "copy" {
-				for _, old := range st.Members {
-					if old.Deleted && agentName(old) == name {
-						cf := &FleetConfirmation{Action: "copy", Name: name, Source: a.ID, Target: name + "-" + randomSecret()[:12], Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
-						st.FleetConfirmation = cf
-						fleetReply(st, t, "Warning: this name has retained Matrix history. The copy gets a fresh identity and room. Confirm within five minutes:\n!fleet confirm-copy "+name+" "+cf.Code)
-						return nil
-					}
-				}
-			}
-			startFleetOperation(st, t, action, a.ID, name, name+"-"+randomSecret()[:12], nextFleetPort(*st))
+			e.fleetBeginNamed(st, t, action, "", a, name)
 		default:
 			fleetReply(st, t, fleetHelp)
 		}
@@ -472,6 +465,116 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 
 func fleetName(name string) bool {
 	return len(name) <= 40 && localpart.MatchString(name) && name != fleetID && name != "." && name != ".."
+}
+
+// fleetStartPrompt asks the operator for a destination name. A pending confirmation
+// blocks it, so only one interaction is ever outstanding.
+func fleetStartPrompt(st *State, t *Turn, action, source, headline, hint string) {
+	if st.FleetConfirmation != nil {
+		fleetReply(st, t, "Finish or cancel the pending confirmation first (!fleet cancel).")
+		return
+	}
+	st.FleetPrompt = &FleetPrompt{Action: action, Source: source, Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
+	fleetReply(st, t, headline+"\n(or: "+hint+")\nCancels with !fleet cancel · expires in 5 minutes")
+}
+
+// fleetPromptAnswer consumes the operator's plain reply to a pending name prompt.
+func (e *Engine) fleetPromptAnswer(turn string) {
+	_ = e.s.Update(func(st *State) error {
+		t := findTurn(st.Members[fleetID], turn)
+		p := st.FleetPrompt
+		if p == nil {
+			t.Phase = "done"
+			return nil
+		}
+		if p.Owner != t.Sender || time.Now().After(p.Expires) {
+			st.FleetPrompt = nil
+			fleetReply(st, t, "That name prompt expired. Tap the action again.")
+			return nil
+		}
+		name := strings.TrimSpace(t.Text)
+		switch p.Action {
+		case promptCopy:
+			a := st.Members[p.Source]
+			if a == nil || a.Deleted || !a.Managed {
+				st.FleetPrompt = nil
+				fleetReply(st, t, "Copy source is no longer available.")
+				return nil
+			}
+			e.fleetBeginNamed(st, t, "copy", "", a, name)
+		case promptTemplate:
+			a := st.Members[p.Source]
+			if a == nil || a.Deleted || !a.Managed {
+				st.FleetPrompt = nil
+				fleetReply(st, t, "Source agent is no longer available.")
+				return nil
+			}
+			e.fleetBeginNamed(st, t, "save-template", "", a, name)
+		case promptCreate:
+			e.fleetBeginNamed(st, t, "create", p.Source, nil, name)
+		default:
+			st.FleetPrompt = nil
+			fleetReply(st, t, "That prompt is no longer available.")
+		}
+		return nil
+	})
+}
+
+// fleetBeginNamed validates a destination name and starts the named operation. The
+// typed command and the name prompt share it, so both behave identically. A
+// rejected name leaves any pending prompt alive so the operator can retry.
+func (e *Engine) fleetBeginNamed(st *State, t *Turn, action, template string, a *Member, name string) {
+	if !fleetName(name) {
+		fleetReply(st, t, "Not a valid agent name. Use up to 40 lowercase letters, digits, dots, dashes or underscores. Reply again, or !fleet cancel.")
+		return
+	}
+	switch action {
+	case "create":
+		if fleetMember(*st, name) != nil {
+			fleetReply(st, t, "Agent name is already in use.")
+			return
+		}
+		tpl, err := readFleetTemplate(e.c.TemplateDir, template)
+		if err != nil {
+			fleetReply(st, t, err.Error())
+			return
+		}
+		id := name + "-" + randomSecret()[:12]
+		for _, old := range st.Members {
+			if old.Deleted && agentName(old) == name {
+				cf := &FleetConfirmation{Action: "create", Name: name, Source: tpl.Name, Target: id, Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
+				st.FleetConfirmation = cf
+				st.FleetPrompt = nil
+				fleetReply(st, t, "Warning: this name belonged to a deleted agent. Its old Matrix rooms/history remain. The replacement gets a fresh identity and room. Confirm within five minutes:\n!fleet confirm-create "+name+" "+cf.Code)
+				return
+			}
+		}
+		st.FleetPrompt = nil
+		startFleetOperation(st, t, "create", tpl.Name, name, id, nextFleetPort(*st))
+	case "copy":
+		if fleetMember(*st, name) != nil {
+			fleetReply(st, t, "Agent name is already in use.")
+			return
+		}
+		for _, old := range st.Members {
+			if old.Deleted && agentName(old) == name {
+				cf := &FleetConfirmation{Action: "copy", Name: name, Source: a.ID, Target: name + "-" + randomSecret()[:12], Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
+				st.FleetConfirmation = cf
+				st.FleetPrompt = nil
+				fleetReply(st, t, "Warning: this name has retained Matrix history. The copy gets a fresh identity and room. Confirm within five minutes:\n!fleet confirm-copy "+name+" "+cf.Code)
+				return
+			}
+		}
+		st.FleetPrompt = nil
+		startFleetOperation(st, t, "copy", a.ID, name, name+"-"+randomSecret()[:12], nextFleetPort(*st))
+	case "save-template":
+		if _, err := os.Lstat(filepath.Join(e.c.TemplateDir, name)); !os.IsNotExist(err) {
+			fleetReply(st, t, "Template destination already exists or is unavailable; templates are never overwritten.")
+			return
+		}
+		st.FleetPrompt = nil
+		startFleetOperation(st, t, "save-template", a.ID, name, name+"-"+randomSecret()[:12], nextFleetPort(*st))
+	}
 }
 
 func nextFleetPort(st State) int {

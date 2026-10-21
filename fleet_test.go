@@ -128,6 +128,56 @@ func fleetTestCommand(t *testing.T, e *Engine, ctx context.Context, text string)
 	return id
 }
 
+// fleetTestText queues the operator's plain reply, as used to answer a name prompt.
+func fleetTestText(t *testing.T, e *Engine, ctx context.Context, text string) string {
+	t.Helper()
+	id := randomSecret()[:12]
+	if err := e.s.Update(func(st *State) error {
+		m := st.Members[fleetID]
+		m.Turns = append(m.Turns, &Turn{ID: id, Room: m.Room, Sender: "@admin:chat.test", Text: text, Phase: "queued"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.fleetCommand(ctx, id)
+	return id
+}
+
+// fleetTap selects a menu option by action, exercising the real menu path.
+func fleetTap(t *testing.T, e *Engine, ctx context.Context, menuAction, menuValue, optionAction, optionValue string) {
+	t.Helper()
+	id := randomSecret()[:12]
+	if err := e.s.Update(func(st *State) error {
+		m := st.Members[fleetID]
+		fleetMenu(st, &Turn{ID: id, Sender: "@admin:chat.test", Room: m.Room}, menuAction, menuValue, e.c.TemplateDir)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	menu := e.s.View().Members[fleetID].Menus[id+"-fleet-menu"]
+	if menu == nil {
+		t.Fatal("menu was not posted")
+	}
+	key := ""
+	for _, o := range menu.Options {
+		if o.Action == optionAction && (optionValue == "" || o.Value == optionValue) {
+			key = o.Key
+		}
+	}
+	if key == "" {
+		t.Fatalf("menu option %q not found", optionAction)
+	}
+	turn := randomSecret()[:12]
+	if err := e.s.Update(func(st *State) error {
+		m := st.Members[fleetID]
+		m.Turns = append(m.Turns, &Turn{ID: turn, Room: m.Room, Sender: "@admin:chat.test", Text: "!menu-choice", Kind: "command", Phase: "queued", MenuID: id + "-fleet-menu", Choice: key})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.fleetCommand(ctx, turn)
+}
+
 func completeFleetTestOperation(t *testing.T, e *Engine, ctx context.Context) {
 	t.Helper()
 	for i := 0; i < 8 && e.s.View().FleetOperation != nil; i++ {
@@ -553,6 +603,134 @@ func TestFleetNeverOverwritesUnownedDestination(t *testing.T) {
 	}
 	if b, err := os.ReadFile(keep); err != nil || string(b) != "keep" {
 		t.Fatal("unowned destination modified")
+	}
+}
+
+func TestFleetNamePromptCopy(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	fleetTap(t, e, ctx, "agent", "iris", promptCopy, "")
+	prompt := e.s.View().FleetPrompt
+	if prompt == nil || prompt.Action != promptCopy || prompt.Source != "iris" || prompt.Owner != "@admin:chat.test" {
+		t.Fatal("copy did not request a name")
+	}
+	fleetTestText(t, e, ctx, "nova")
+	if e.s.View().FleetPrompt != nil {
+		t.Fatal("answered prompt stayed pending")
+	}
+	op := e.s.View().FleetOperation
+	if op == nil || op.Action != "copy" || op.Name != "nova" {
+		t.Fatal("plain reply did not start the copy")
+	}
+	completeFleetTestOperation(t, e, ctx)
+	copy := fleetMember(e.s.View(), "nova")
+	if copy == nil || !copy.Paused {
+		t.Fatal("copied agent missing or not paused")
+	}
+}
+
+func TestFleetNamePromptCreateFromTemplate(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	clean := filepath.Join(e.c.TemplateDir, "basic")
+	writeFleetFixture(t, clean, "basic")
+	if err := os.WriteFile(filepath.Join(clean, "fleet-template.json"), jsonBytes(FleetTemplate{Kind: "Clean"}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fleetTap(t, e, ctx, "templates", "", "template", "basic")
+	prompt := e.s.View().FleetPrompt
+	if prompt == nil || prompt.Action != promptCreate || prompt.Source != "basic" {
+		t.Fatal("template did not request an agent name")
+	}
+	fleetTestText(t, e, ctx, "lyra")
+	op := e.s.View().FleetOperation
+	if op == nil || op.Action != "create" || op.Name != "lyra" {
+		t.Fatal("plain reply did not start the creation")
+	}
+	completeFleetTestOperation(t, e, ctx)
+	created := fleetMember(e.s.View(), "lyra")
+	if created == nil || created.Paused {
+		t.Fatal("clean-created agent missing or not available")
+	}
+}
+
+func TestFleetNamePromptInvalidNameKeepsPrompt(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	fleetTap(t, e, ctx, "agent", "iris", promptCopy, "")
+	fleetTestText(t, e, ctx, "Not A Valid Name")
+	if e.s.View().FleetPrompt == nil {
+		t.Fatal("invalid name discarded the prompt")
+	}
+	if e.s.View().FleetOperation != nil {
+		t.Fatal("invalid name started an operation")
+	}
+	m := e.s.View().Members[fleetID]
+	if !strings.Contains(strings.ToLower(m.Outbox[len(m.Outbox)-1].Text), "not a valid agent name") {
+		t.Fatal("invalid name was not explained")
+	}
+	fleetTestText(t, e, ctx, "nova")
+	if e.s.View().FleetOperation == nil {
+		t.Fatal("prompt did not recover after a valid name")
+	}
+}
+
+func TestFleetNamePromptExpiryAndCancel(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	fleetTap(t, e, ctx, "agent", "iris", promptCopy, "")
+	_ = e.s.Update(func(st *State) error {
+		st.FleetPrompt.Expires = time.Now().Add(-time.Second)
+		return nil
+	})
+	fleetTestText(t, e, ctx, "nova")
+	if e.s.View().FleetOperation != nil || e.s.View().FleetPrompt != nil {
+		t.Fatal("expired prompt was answered")
+	}
+	m := e.s.View().Members[fleetID]
+	if !strings.Contains(m.Outbox[len(m.Outbox)-1].Text, "expired") {
+		t.Fatal("expiry was not explained")
+	}
+	fleetTap(t, e, ctx, "agent", "iris", promptCopy, "")
+	fleetTestCommand(t, e, ctx, "!fleet cancel")
+	if e.s.View().FleetPrompt != nil {
+		t.Fatal("cancel did not clear the prompt")
+	}
+}
+
+func TestFleetNamePromptRefusedWhileConfirmationPending(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	fleetTestCommand(t, e, ctx, "!fleet delete iris")
+	if e.s.View().FleetConfirmation == nil {
+		t.Fatal("delete confirmation missing")
+	}
+	fleetTap(t, e, ctx, "agent", "iris", promptCopy, "")
+	if e.s.View().FleetPrompt != nil {
+		t.Fatal("prompt started while a confirmation was pending")
+	}
+}
+
+func TestFleetPlainTextOnlyAdmittedWhilePromptPending(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	e.mx.Base = httptestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		replyJSON(w, syncRooms(map[string]any{
+			"!fleet:chat.test": map[string]any{"timeline": map[string]any{"events": []any{
+				message("plain", "@admin:chat.test", "just chatting", ""),
+			}}},
+		}))
+	}))
+	if err := e.mx.syncOnce(ctx, e.s, fleetID); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.s.View().Members[fleetID].Turns) != 0 {
+		t.Fatal("plain text admitted without a pending prompt")
+	}
+	_ = e.s.Update(func(st *State) error {
+		st.FleetPrompt = &FleetPrompt{Action: promptCopy, Source: "iris", Owner: "@admin:chat.test", Expires: time.Now().Add(time.Minute)}
+		return nil
+	})
+	if err := e.mx.syncOnce(ctx, e.s, fleetID); err != nil {
+		t.Fatal(err)
+	}
+	turns := e.s.View().Members[fleetID].Turns
+	if len(turns) != 1 || turns[0].Text != "just chatting" || turns[0].Kind != "" {
+		t.Fatal("plain reply not admitted for a pending prompt")
 	}
 }
 

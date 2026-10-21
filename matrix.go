@@ -659,6 +659,13 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	if m.Room == "" || bot.Token == "" {
 		return errors.New("agent room or bot credentials unavailable")
 	}
+	// The Fleet room admits plain text only while a name prompt is pending, so an
+	// operator's reply can name a new agent without being read as a command.
+	fleetPrompt := false
+	if m.Controller {
+		live := s.View()
+		fleetPrompt = live.FleetPrompt != nil && live.FleetPrompt.Owner == "@"+mx.c.Admin+":"+mx.c.ServerName && time.Now().Before(live.FleetPrompt.Expires)
+	}
 	// One sync stream per agent covers its provisioned room plus every room the bot was invited
 	// to. Timeline entries are capped per room so a full fleet stays inside the response limit,
 	// and no room restriction is set because invites are only visible without one.
@@ -761,7 +768,7 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			if t.Media == nil && strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
-			if m.Controller && (t.Kind != "command" || t.Thread != "") {
+			if m.Controller && (t.Thread != "" || (t.Kind != "command" && !fleetPrompt)) {
 				continue
 			}
 			// A command that does not address this agent is ambiguous once several fleet bots

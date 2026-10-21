@@ -25,7 +25,16 @@ type State struct {
 	Members                      map[string]*Member
 	FleetOperation               *FleetOperation
 	FleetConfirmation            *FleetConfirmation
+	FleetPrompt                  *FleetPrompt
 	FleetDir, TemplateDir        string
+}
+
+// FleetPrompt is a short-lived request for a destination name. It is separate from
+// FleetConfirmation: a confirmation expects an echoed code, a prompt expects the
+// operator's next plain message. Only one interaction is pending at a time.
+type FleetPrompt struct {
+	Action, Source, Owner string
+	Expires               time.Time
 }
 type Member struct {
 	ID, Dir, Home, Project, Service, Network       string

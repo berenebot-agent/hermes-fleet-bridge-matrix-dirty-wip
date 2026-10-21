@@ -463,10 +463,15 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		rt.controls = map[string]bool{}
 	}
 	for _, t := range m.Turns {
-		if t.Kind != "command" || (t.Phase != "queued" && t.Phase != "processing") || rt.controls[t.ID] {
+		// The controller also dispatches the plain reply that answers a name prompt.
+		plain := m.Controller && t.Kind == ""
+		if t.Kind != "command" && !plain {
 			continue
 		}
-		urgent := false
+		if (t.Phase != "queued" && t.Phase != "processing") || rt.controls[t.ID] {
+			continue
+		}
+		urgent := plain
 		fields := strings.Fields(t.Text)
 		if len(fields) > 0 {
 			switch fields[0] {
