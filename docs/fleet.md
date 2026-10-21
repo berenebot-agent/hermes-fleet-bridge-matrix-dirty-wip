@@ -65,6 +65,14 @@ API ports fail startup rather than enrolling an unsafe fleet. Keep unrelated
 files outside this directory. Hidden staging directories and pending operation
 destinations are left to durable operation recovery.
 
+An adopted directory keeps its own Compose file, so two names must not collide
+with anything else on the host: its Compose project (the directory basename
+unless the Compose file sets one) and any fixed `container_name` in the service
+definition. Docker container names are global, so a copy of an agent that still
+runs elsewhere keeps the source's `container_name` and then fails to start with
+an opaque Compose error. Rename the container or drop the line before
+adopting.
+
 Controller state remains authoritative for existing identities, names, pause
 state and conversation mappings. Newly discovered directories recover their
 identity from `.fleet-owner.json` when present, or use the directory basename
