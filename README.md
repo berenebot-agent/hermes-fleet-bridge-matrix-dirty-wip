@@ -172,11 +172,11 @@ controlled by the bundled Element configuration.
 
 ### Phone and Web verification
 
-For a fresh account, start with Element X, complete its supported security setup,
-and save the recovery key privately. Then verify the Web login using the trusted
-phone or recovery key. Existing sessions should remain usable; new logins may
-require verification. Account verification does not enable encryption in agent
-rooms. See [client setup and recovery](docs/client-setup.md).
+For a fresh account, start with Element X and complete device verification if it
+asks. Leave key storage/recovery **off**: no room is encrypted here, so it protects
+nothing, and an incomplete setup is what produces the "key storage out of sync"
+prompt. Then verify the Web login from the trusted phone. Account verification does
+not enable encryption in agent rooms. See [client setup](docs/client-setup.md).
 
 ## Commands
 

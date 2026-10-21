@@ -1,35 +1,65 @@
 # Element X and Element Web setup
 
 Rooms remain **unencrypted**: the homeserver stores their messages in
-server-readable form. Account/device verification is separate from room
-encryption. It establishes trust in a login; disabling room encryption does
-not guarantee that clients will stop asking to verify devices.
+server-readable form. Client account/device verification is a separate concern
+from room encryption. Disabling room encryption does not stop clients from
+asking to verify devices or to configure key backup.
 
-Use the provisioned account, not public registration (which stays disabled).
-For a fresh account, start with Element X and let it complete its supported
-security setup. It may bootstrap its first device automatically; this is not
-a guarantee for every app version. Set up recovery when offered and store the
-recovery key privately. Never paste passwords or recovery keys into chat or logs.
+## What actually needs setting up
 
-Keep the phone signed in, then sign into the bundled Element Web website.
-Verify the Web session using that trusted phone (compare the displayed
-emoji/number sequence or use the offered verification method), or use the
-recovery key. Verify only sessions you initiated and recognise.
+Because no room is encrypted and no encrypted history exists, server-side key
+backup and recovery protect nothing here. The useful steps are:
 
-If no trusted device or recovery key remains, the client's **Can't confirm?** /
-reset-identity flow may be necessary. Read its data-loss warning first:
-resetting an identity is not the same as verifying it, and may make encrypted
-history inaccessible. A single device can recover using a saved recovery key;
-a second device is not always required. Do not repeatedly reset identities to
-silence a prompt.
+1. Log in with the provisioned credentials. Public registration stays disabled.
+2. Complete device verification if the client asks. On a fresh account the
+   first Element X login normally bootstraps cross-signing and signs its own
+   device, which leaves the session verified without an extra step.
+3. Leave **key storage / recovery** off. It is not needed for unencrypted rooms.
 
-Reopening the same signed-in sessions should not repeatedly require verification.
-A new login, reinstallation or cleared client storage may need verification
-again. Keep the trusted device and recovery key rather than signing out to
-troubleshoot. If the prompt returns in an unchanged session, record the app
-version and exact prompt and investigate before wiping state.
+There is no bridge-side code that enables, disables or repairs client key
+storage. It is entirely client account state.
 
-Bundled Web configuration does not configure the installed Element X app.
-There is no verification-suppression module in this deployment. Actual first
-login and subsequent-session behaviour must be checked with the installed
-Element X version; automated bridge tests do not exercise the native app.
+## Element X can turn key storage back on
+
+Element X hardcodes `autoEnableCrossSigning(true)` and `autoEnableBackups(true)`
+in `RustMatrixClientFactory`, so a first login may create a backup version and a
+secret-storage key even though nothing here uses encryption. It also ignores the
+`io.element.e2ee.force_disable` well-known key; that convention is Element Web
+only.
+
+If Element X offers key storage, you can switch **Settings → Encryption →
+Allow key storage** off. The client then marks backups explicitly disabled
+(`m.key_backup.enabled=false`, `m.org.matrix.custom.backup_disabled.disabled=true`),
+which stops later logins from re-enabling them automatically. Restart the app
+afterwards so the settings screen re-reads the server state.
+
+## "Your key storage is currently out of sync"
+
+This appears when secret storage is enabled but is missing one of the cross-signing
+secrets (`m.cross_signing.master`, `self_signing`, `user_signing`). Re-entering a
+recovery key does not fix it, because the missing secrets were never stored — the
+key unlocks the store, it cannot recreate absent contents. This is a known client
+behaviour, tracked upstream as
+[element-x-android#4343](https://github.com/element-hq/element-x-android/issues/4343)
+and [matrix-rust-sdk#4736](https://github.com/matrix-org/matrix-rust-sdk/issues/4736).
+
+Prefer **disabling key storage** over resetting the cryptographic identity. A
+reset is the last resort, because it invalidates the current verification state
+and can leave encrypted history unreachable. Do not repeat resets to silence a
+prompt.
+
+To confirm the real server state rather than the app's cached view, read the
+account data for the affected user: `m.secret_storage.default_key` absent plus
+`m.key_backup.enabled=false` means recovery is disabled and out of scope.
+
+## Verifying Web against the phone
+
+Keep the phone signed in and verify the Web session from it (compare the shown
+emoji or numbers), or use a recovery key if one was deliberately kept. Verify
+only sessions you initiated. Existing signed-in sessions should keep working;
+a new login, reinstall or cleared client storage may need verification again.
+
+Bundled Web configuration does not configure an installed Element X app, and no
+verification-suppression module ships with this deployment. Actual first-login
+and repeat-session behaviour must be checked against the installed app version;
+the automated bridge tests do not exercise native clients.
