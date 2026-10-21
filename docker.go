@@ -52,6 +52,24 @@ func (d *Docker) get(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// post sends a Docker API request that expects no response body.
+func (d *Docker) post(ctx context.Context, path string) error {
+	r, e := http.NewRequestWithContext(ctx, "POST", "http://docker"+path, nil)
+	if e != nil {
+		return stateError("Docker request")
+	}
+	res, e := d.client.Do(r)
+	if e != nil {
+		return errors.New("Docker socket unavailable")
+	}
+	defer res.Body.Close()
+	io.Copy(io.Discard, io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return errors.New("Docker request failed")
+	}
+	return nil
+}
+
 type cappedBuffer struct {
 	bytes.Buffer
 	limit int
@@ -273,10 +291,14 @@ func configureEnvKey(path, host string, port int, rotate bool) (string, error) {
 }
 
 type containerInfo struct {
-	ID              string                             `json:"Id"`
-	State           struct{ Running bool }             `json:"State"`
-	Config          struct{ Labels map[string]string } `json:"Config"`
-	HostConfig      struct{ NetworkMode string }       `json:"HostConfig"`
+	ID         string                             `json:"Id"`
+	State      struct{ Running bool }             `json:"State"`
+	Config     struct{ Labels map[string]string } `json:"Config"`
+	HostConfig struct{ NetworkMode string }       `json:"HostConfig"`
+	Mounts     []struct {
+		Type   string `json:"Type"`
+		Source string `json:"Source"`
+	} `json:"Mounts"`
 	NetworkSettings struct {
 		Networks map[string]struct {
 			IP string `json:"IPAddress"`
@@ -294,6 +316,58 @@ func (d *Docker) checkProject(ctx context.Context, m *Member) error {
 	for _, v := range list {
 		if v.Labels["com.docker.compose.project"] == m.Project && filepath.Clean(v.Labels["com.docker.compose.project.working_dir"]) != m.Dir {
 			return errors.New("Compose project name collides with an unmanaged directory")
+		}
+	}
+	return nil
+}
+
+// mountHolders lists every container that mounts anything under dir, whatever Compose project
+// it belongs to. A managed agent's directory is erased by hand, so an unrelated container that
+// still mounts it would keep writing into a deleted path. Project labels are not enough: a
+// stray project can share the same bind mount.
+func (d *Docker) mountHolders(ctx context.Context, dir string) ([]string, error) {
+	var list []struct {
+		ID string `json:"Id"`
+	}
+	if err := d.get(ctx, "/containers/json?all=1", &list); err != nil {
+		return nil, err
+	}
+	var holders []string
+	for _, v := range list {
+		var info containerInfo
+		if err := d.get(ctx, "/containers/"+v.ID+"/json", &info); err != nil {
+			return nil, err
+		}
+		for _, mount := range info.Mounts {
+			if mount.Type != "bind" || mount.Source == "" {
+				continue
+			}
+			if pathWithin(dir, filepath.Clean(mount.Source)) {
+				holders = append(holders, v.ID)
+				break
+			}
+		}
+	}
+	return holders, nil
+}
+
+// stopMountHolders stops every container that mounts the agent's directory, including ones the
+// bridge does not manage. It refuses to act on an unidentified container.
+func (d *Docker) stopMountHolders(ctx context.Context, dir string) error {
+	holders, err := d.mountHolders(ctx, dir)
+	if err != nil {
+		return err
+	}
+	for _, id := range holders {
+		var info containerInfo
+		if err := d.get(ctx, "/containers/"+id+"/json", &info); err != nil {
+			return err
+		}
+		if info.ID == "" {
+			return errors.New("cannot identify a container that mounts the agent directory; refusing to stop it")
+		}
+		if err := d.post(ctx, "/containers/"+id+"/stop?t=60"); err != nil {
+			return err
 		}
 	}
 	return nil

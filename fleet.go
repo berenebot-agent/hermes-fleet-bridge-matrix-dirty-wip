@@ -26,6 +26,14 @@ const (
 
 var errDeactivationUnavailable = errors.New("Matrix account deactivation unconfirmed")
 
+// errAgentUnreachable marks an agent whose API cannot be reached at all. It is different from
+// an agent that is merely busy: a busy agent will finish, an unreachable one never will.
+var errAgentUnreachable = errors.New("the agent's API is unreachable, so its activity cannot be proven")
+
+// errAgentBusy marks an agent that answered but still has work in flight. It is a normal
+// wait, not a fault, so it never holds the operation.
+var errAgentBusy = errors.New("the agent still has work in flight")
+
 type FleetConfirmation struct {
 	Action, Target, Name, Source, Code, Owner string
 	Expires                                   time.Time
@@ -36,6 +44,10 @@ type FleetOperation struct {
 	ID, Action, Source, Name, Target, Stage, Error string
 	WasRunning, WasPaused                          bool
 	Port                                           int
+	// Forced marks a delete that could not drain through the agent's API and was
+	// explicitly confirmed by the operator. It relaxes the drain proof, never the
+	// storage boundaries.
+	Forced bool
 }
 
 func agentName(m *Member) string {
@@ -243,6 +255,7 @@ const fleetHelp = `Fleet controls (operator only, in this room):
 !fleet save-template <agent> as <template>
 !fleet rename <agent> to <name>
 !fleet delete <agent>
+!fleet force-delete <agent> — delete without draining, when a normal delete cannot complete
 !fleet cancel — cancel a waiting operation, confirmation or name prompt
 !fleet retry — retry a held operation after fixing the reported problem
 
@@ -304,6 +317,7 @@ func fleetMenu(st *State, t *Turn, action, value, extra string) {
 				{Label: "Start", Action: "start", Value: value},
 				{Label: "Shutdown", Action: "shutdown", Value: value}, availability,
 				{Label: "Delete", Action: "delete", Value: value},
+				{Label: "Force delete (no drain)", Action: "force-delete", Value: value},
 				{Label: "Back to agent", Action: "agent", Value: value},
 			}
 		}
@@ -501,6 +515,52 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 				startFleetOperation(st, t, cf.Action, cf.Source, cf.Name, cf.Target, nextFleetPort(*st))
 			}
 			st.FleetConfirmation = nil
+			return nil
+		case "force-delete":
+			// A force delete is the operator's explicit override of a delete that
+			// cannot drain. It is confirmed separately, and it may replace an
+			// operation that is stuck waiting on the same broken agent.
+			a := fleetMember(*st, value)
+			if a == nil {
+				a = st.Members[value]
+			}
+			if a == nil || a.Deleted || !a.Managed || a.Controller {
+				fleetReply(st, t, "Managed agent not found. Use !fleet agents.")
+				return nil
+			}
+			cf := &FleetConfirmation{Action: "force-delete", Target: a.ID, Name: agentName(a), Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
+			st.FleetConfirmation = cf
+			st.FleetPrompt = nil
+			fleetReply(st, t, "Force delete "+cf.Name+"?\nThis stops the agent's containers without draining admitted work, erases its managed directory including files, memories, history and credentials, purges its Matrix room, and deactivates its account. In-flight work cannot be drained and will be stopped; tool effects already made are not undone. Any container that mounts this agent's directory is stopped too. Retain saved templates, other copies and shared images.\nConfirm within five minutes:\n!fleet confirm-force-delete "+cf.Name+" "+cf.Code+"\n!fleet cancel to cancel.")
+			return nil
+		case "confirm-force-delete":
+			cf := st.FleetConfirmation
+			if cf == nil || cf.Owner != t.Sender || time.Now().After(cf.Expires) || cf.Code != name || cf.Name != value || cf.Action != "force-delete" {
+				fleetReply(st, t, "Confirmation is invalid or expired; request the operation again.")
+				return nil
+			}
+			a := st.Members[cf.Target]
+			if a == nil || a.Deleted || agentName(a) != cf.Name {
+				fleetReply(st, t, "Target changed; request deletion again.")
+				return nil
+			}
+			// Replace a stuck operation on the same agent; refuse to disturb another.
+			if op := st.FleetOperation; op != nil {
+				if op.Source != a.ID || op.Action != "delete" {
+					fleetReply(st, t, "Another fleet operation is pending. Use !fleet to inspect it, cancel while waiting, or retry after fixing a problem.")
+					return nil
+				}
+				if op.Stage != "waiting" && op.Stage != "stopping" {
+					fleetReply(st, t, "The delete has already passed the point where it can be forced. Use !fleet to inspect it.")
+					return nil
+				}
+				if a := st.Members[op.Source]; a != nil {
+					a.Draining = false
+				}
+				st.FleetOperation = nil
+			}
+			st.FleetConfirmation = nil
+			startForcedDelete(st, t, a.ID)
 			return nil
 		}
 		if st.FleetOperation != nil {
@@ -704,6 +764,15 @@ func startFleetOperation(st *State, t *Turn, action, source, name, target string
 	fleetReply(st, t, "Fleet operation queued: "+action+". New work is blocked while admitted work drains. Use !fleet for progress; !fleet cancel works until draining completes.")
 }
 
+// startForcedDelete starts a delete that the operator explicitly forced, so it does not wait
+// for admitted work to drain.
+func startForcedDelete(st *State, t *Turn, source string) {
+	startFleetOperation(st, t, "delete", source, "", "", 0)
+	if st.FleetOperation != nil {
+		st.FleetOperation.Forced = true
+	}
+}
+
 func (e *Engine) fleetStep(ctx context.Context) {
 	e.fleetMu.Lock()
 	defer e.fleetMu.Unlock()
@@ -774,9 +843,6 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 			rt.mu.Lock()
 			busy := len(rt.busy) > 0 || len(rt.controls) > 0
 			rt.mu.Unlock()
-			if busy || pending(a) > 0 {
-				return nil
-			}
 			if err := e.docker.validateManaged(ctx, e.c, a); err != nil {
 				return err
 			}
@@ -787,10 +853,24 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 			if err != nil && !errors.Is(err, errStopped) {
 				return err
 			}
-			if err == nil && op.Action != "start" {
-				if !e.fleetInactive(ctx, a, endpoint) {
+			// The agent's own state is checked before its admitted work, so a broken
+			// agent is reported as broken instead of waiting for work that can
+			// never be drained. A merely busy agent is a normal wait.
+			if err == nil && op.Action != "start" && !op.Forced {
+				idle, reason := e.fleetInactive(ctx, a, endpoint)
+				if !idle && errors.Is(reason, errAgentUnreachable) && op.Action == "delete" {
+					return e.fleetHoldDelete(ctx, op, a, reason)
+				}
+				if !idle {
 					return nil
 				}
+			}
+			if busy || pending(a) > 0 {
+				if op.Forced {
+					// A forced delete does not wait for admitted work to finish.
+					return e.fleetStage(op, "stopping")
+				}
+				return nil
 			}
 			if err = e.s.Update(func(st *State) error {
 				if st.FleetOperation == nil || st.FleetOperation.ID != op.ID {
@@ -821,8 +901,11 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 			return err
 		}
 		if endpoint, err := e.docker.endpoint(ctx, a); err == nil {
-			if !e.fleetInactive(ctx, a, endpoint) {
-				return errors.New("agent activity changed; refusing shutdown")
+			if !op.Forced {
+				idle, reason := e.fleetInactive(ctx, a, endpoint)
+				if !idle {
+					return errors.New("agent activity changed; refusing shutdown: " + reason.Error())
+				}
 			}
 		} else if !errors.Is(err, errStopped) {
 			return err
@@ -835,6 +918,13 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 		}
 		if _, err := e.docker.compose(stopCtx, a, "down", "--remove-orphans", "--timeout", "60"); err != nil {
 			return err
+		}
+		if op.Forced {
+			// The managed project is down, but an unmanaged container may still
+			// mount the agent's directory. Stop it before the storage is erased.
+			if err := e.docker.stopMountHolders(stopCtx, a.Dir); err != nil {
+				return err
+			}
 		}
 		switch op.Action {
 		case "pause", "shutdown":
@@ -850,6 +940,27 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 		defer e.mediaMu.Unlock()
 		if err := e.docker.fleetProjectEmpty(ctx, a); err != nil {
 			return err
+		}
+		// An unmanaged container may still mount the agent's directory. Erasing it
+		// underneath such a container leaves a live process writing into a deleted
+		// path, so stop it first and refuse to erase while one remains.
+		holders, err := e.docker.mountHolders(ctx, a.Dir)
+		if err != nil {
+			return err
+		}
+		if len(holders) > 0 {
+			if op.Forced {
+				if err := e.docker.stopMountHolders(ctx, a.Dir); err != nil {
+					return err
+				}
+				holders, err = e.docker.mountHolders(ctx, a.Dir)
+				if err != nil {
+					return err
+				}
+			}
+			if len(holders) > 0 {
+				return errors.New("a container outside this agent's Compose project still mounts its directory; stop it before deleting")
+			}
 		}
 		if err := deleteFleetTree(e.c.FleetDir, a.Dir); err != nil {
 			return err
@@ -932,15 +1043,48 @@ func validFleetOperation(op *FleetOperation, st State) bool {
 	return a != nil && a.Managed && !a.Controller && (!a.Deleted || (op.Action == "delete" && op.Stage == "deleting"))
 }
 
-func (e *Engine) fleetInactive(ctx context.Context, m *Member, endpoint string) bool {
+// fleetInactive reports whether the agent is provably idle through its authenticated API.
+// It distinguishes "cannot tell" from "busy": the caller must not treat an unreachable API
+// as a quiet agent, because that is how a broken agent turns a delete into an endless wait.
+func (e *Engine) fleetInactive(ctx context.Context, m *Member, endpoint string) (bool, error) {
 	var h detailedHealth
-	if api(ctx, "GET", endpoint, "/health/detailed", e.mx.key(m.ID), nil, &h, nil) != nil {
-		return false
+	if err := api(ctx, "GET", endpoint, "/health/detailed", e.mx.key(m.ID), nil, &h, nil); err != nil {
+		return false, fmt.Errorf("%w: %w", errAgentUnreachable, err)
 	}
 	b := h.Readiness.Checks.Background
-	return h.Readiness.Status == "ok" && h.Busy != nil && !*h.Busy && h.Drainable != nil && *h.Drainable && h.Active != nil && *h.Active == 0 && b.Runs != nil && *b.Runs == 0 && b.Processes != nil && *b.Processes == 0 && b.Delegates != nil && *b.Delegates == 0
+	idle := h.Readiness.Status == "ok" && h.Busy != nil && !*h.Busy && h.Drainable != nil && *h.Drainable && h.Active != nil && *h.Active == 0 && b.Runs != nil && *b.Runs == 0 && b.Processes != nil && *b.Processes == 0 && b.Delegates != nil && *b.Delegates == 0
+	if !idle {
+		return false, errAgentBusy
+	}
+	return true, nil
 }
 
+// fleetHoldDelete reports a delete that cannot drain through the agent's API and offers the
+// operator the force. The offer is a separate, explicitly confirmed step: the operator says
+// yes to erasing an agent whose work cannot be drained.
+func (e *Engine) fleetHoldDelete(ctx context.Context, op *FleetOperation, a *Member, reason error) error {
+	_ = e.s.Update(func(st *State) error {
+		current := st.FleetOperation
+		if current == nil || current.ID != op.ID {
+			return nil
+		}
+		current.Error = reason.Error()
+		m := st.Members[fleetID]
+		text := "Fleet operation held: " + reason.Error() + "."
+		if pending(a) > 0 {
+			text += " This agent has admitted work that only a working API can drain, so !discard cannot release it either."
+		}
+		text += " Fix the problem locally, then !fleet retry."
+		if errors.Is(reason, errAgentUnreachable) {
+			text += "\nOr delete it anyway with !fleet force-delete " + agentName(a) + " — that stops its containers without draining, erases its directory, and deactivates its Matrix account. In-flight work cannot be drained and will be stopped."
+		}
+		addNotice(m, op.ID+"-error-"+stableID(reason.Error())[:8], m.Room, "", text)
+		return nil
+	})
+	return reason
+}
+
+// finishFleet completes an operation and clears the durable record.
 func (e *Engine) finishFleet(op *FleetOperation, warning string) error {
 	return e.s.Update(func(st *State) error {
 		if st.FleetOperation == nil || st.FleetOperation.ID != op.ID {

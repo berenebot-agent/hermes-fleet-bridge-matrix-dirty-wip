@@ -371,12 +371,15 @@ Default **[Fleet management](docs/fleet.md)** adds a private operator-only room
 for start/shutdown/pause/enable, clean-template creation, full copies, saved full
 snapshot templates, display/room renaming and exact-name-confirmed permanent deletion.
 The agent menu keeps Refresh status, Rename, Copy and Save as template top-level;
-More · Lifecycle contains Start, Shutdown, Pause/Enable and Delete.
+More · Lifecycle contains Start, Shutdown, Pause/Enable, Delete and Force delete.
 Renaming never moves the agent directory or restarts its containers.
 It uses managed parent-directory mounts in the main Compose file; existing
 deployments are not silently migrated.
 Matrix history is erased when an agent is deleted: its own room is purged from
 the homeserver and leaves your room list.
+A delete whose agent API is unreachable is held with the reason stated instead
+of waiting silently, and `!fleet force-delete <agent>` deletes it without
+draining, after its own confirmation.
 
 Without Fleet management, recreate the service after editing membership/mounts. Adding an agent provisions
 its room; removing one disables new dispatch, cancels queued turns, drains admitted

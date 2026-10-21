@@ -237,7 +237,7 @@ func TestFleetAgentMenuGroupingAndIdentityBinding(t *testing.T) {
 		if m.Used {
 			continue
 		}
-		want := []string{"start", "shutdown", "pause", "delete", "agent"}
+		want := []string{"start", "shutdown", "pause", "delete", "force-delete", "agent"}
 		if len(m.Options) != len(want) {
 			t.Fatal("unexpected More menu size")
 		}

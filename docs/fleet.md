@@ -160,6 +160,7 @@ Commands:
 !fleet save-template iris as iris-snapshot
 !fleet rename iris to nova
 !fleet delete iris
+!fleet force-delete iris
 !fleet cancel
 !fleet retry
 ```
@@ -187,6 +188,8 @@ Once stopping/copying/deleting begins, cancellation is refused. An approval wait
 held turn, or nonzero/incomplete authenticated activity counters can keep it
 waiting indefinitely: resolve those deliberately. There is no automatic force
 kill. Fix a held operation's reported problem locally, then use `!fleet retry`.
+A delete whose agent API is unreachable is held with that reason stated and the
+force offered; see [Deleting an agent that cannot drain](#deleting-an-agent-that-cannot-drain).
 
 ## Rename an agent
 
@@ -338,6 +341,16 @@ adding dependencies or updating Hermes can rebuild the environment and grow the
 directory again. Recheck imports and actual tool execution on image upgrades;
 successful chat alone does not verify every optional Hermes feature.
 
+**Keep `plugins.enabled` in step with the installed plugins.** Hermes builds the
+dependency environment from the enabled plugin list, not from what is present
+on disk. A home whose `config.yaml` lists no enabled plugin rebuilds without
+its installed plugins and loses their dependencies: `homeassistant` needs
+`aiohttp`, and without it the API server has no adapter, the gateway logs
+`API Server: aiohttp not installed`, and the agent never answers a message.
+The bake helper refuses a template whose installed plugins are not all enabled,
+so a template cannot carry that inconsistency.
+
+
 `!fleet save-template iris as iris-snapshot` creates a **Full snapshot** template.
 It copies all persistent files, including memories, conversation databases,
 instructions, skills, provider credentials and integration settings. It is an
@@ -413,6 +426,37 @@ durably retires dispatch before erasing the agent directory. Deletion is retried
 idempotently after a partial failure/restart; it never crosses the managed parent,
 follows a symlink root or erases another project's storage. No archive, restore,
 force-stop or built-in undo is provided.
+
+Erasing the directory also requires that no container still mounts it, whatever
+Compose project it belongs to. A container outside the managed project that shares
+the bind mount would otherwise keep writing into a deleted path, so the delete
+is held until it is stopped.
+
+## Deleting an agent that cannot drain
+
+A delete drains through the agent's own authenticated API. If that API is
+unreachable — the agent is broken, or its Hermes server never started — the drain
+can never be proven, and neither can `!discard` release the turn that is holding
+it. The operation is then held with the reason stated, and the operator is
+offered the force:
+
+```text
+!fleet force-delete iris
+!fleet confirm-force-delete iris <short-lived-code>
+```
+
+The force is a separate, explicitly confirmed step with its own short-lived
+code, bound to the operator and the specific internal identity. It may be issued
+at any time, including while a normal delete is stuck waiting on the same agent;
+it replaces that operation rather than queueing behind it. It refuses to disturb
+an operation on a different agent.
+
+A forced delete stops the agent's containers without draining admitted work,
+erases its managed directory, purges its Matrix room and deactivates its
+account. In-flight work cannot be drained and is stopped; tool effects already
+made are not undone. Any container that mounts the agent's directory is stopped
+too. The storage boundaries are unchanged: the force relaxes the drain proof,
+never the directory or mount checks.
 
 The agent's own Matrix room is then erased with Tuwunel 1.9.2's administrator
 delete-room endpoint (`purge` and `block`): every local member is evicted, the
