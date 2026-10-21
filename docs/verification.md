@@ -1,5 +1,52 @@
 # MVP verification
 
+## Silent container-lifecycle notices — 2026-10-22
+
+Container start/ready/stop notices are now delivered as `m.notice` instead of
+`m.text`. The Matrix specification defines `.m.rule.suppress_notices` as a
+**default, enabled** push rule matching `content.msgtype == "m.notice"` with no
+notify action, so a client shows the notice in the timeline without notifying
+the user. No push-rule management, no per-user state, no new dependency. A
+**failed** shutdown stays an ordinary message, because it reports a problem the
+user has to act on.
+
+- `gofmt -l .` passed (final formatting gate).
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T181126-go-vet_._...-3540231.log`.
+- `go test -race -count=1 ./...` passed (29.212s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/final/out.log`.
+- New fake-endpoint coverage: `TestLifecycleNoticeIsSilentAndReplyIsNot`
+  encrypts both a lifecycle notice and an ordinary reply with the real
+  Olm/Megolm stack, decrypts them on the recipient side and asserts the
+  lifecycle notice carries `m.notice` while the reply stays `m.text`. The
+  msgtype is inside the encrypted payload, so this is the content a client
+  actually evaluates its push rules on. `TestContainerLifecycleNotices` also
+  asserts that the start, ready and idle-shutdown notices are silent and that a
+  failed shutdown is not.
+- The real homeserver was queried with an authenticated admin token:
+  `GET /_matrix/client/v3/pushrules/` returns `.m.rule.suppress_notices` with
+  `"default": true`, `"enabled": true`, `content.msgtype == "m.notice"` and an
+  empty `actions` list. The bundled Element Web 1.12.13 bundle contains the
+  rule as a first-class SDK constant, and the SDK's push processor resolves
+  `content.msgtype` through `getContent()`, which is the decrypted content for a
+  decrypted event.
+- **Live end-to-end check.** A scratch Tuwunel 1.9.2 homeserver was started from
+  the application image with a local agent and a fake Hermes API, the agent's
+  room was encrypted, and the real controller was driven through a wake, a
+  readiness notice and an idle shutdown. Decrypting the resulting
+  `m.room.encrypted` events with the bot's own session keys gave:
+  `msgtype=m.notice` for "Agent iris is starting…", "Agent iris is ready." and
+  "Agent iris is shutting down (idle timeout).", and `msgtype=m.text` for the
+  agent's answer. That is the exact content a client evaluates push rules on.
+- **Not run for this change:** a human completing Element's device-verification
+  wizard in a browser, so the notification was confirmed through the push rule,
+  the bundled client's evaluation code and the decrypted wire content rather
+  than by observing a desktop notification. The `tests/integration.py` real-image
+  check is stale and does not run against the current build: it still uses the
+  removed `HERMES_DIRS` setting, does not set the now-required `FLEET_DIR` and
+  `FLEET_TEMPLATE_DIR`, and sends plaintext messages that the E2EE controller
+  refuses. That is a pre-existing gap, not a result of this change.
+
 ## Tool-call summaries — 2026-10-22
 
 The bridge now relays each tool call of a running turn into the originating

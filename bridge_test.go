@@ -802,6 +802,9 @@ func TestContainerLifecycleNotices(t *testing.T) {
 			if n.Room != m.Room {
 				t.Fatal("lifecycle notice left the agent's room")
 			}
+			if !n.Silent {
+				t.Fatalf("container state notice would notify the user: %q", n.Text)
+			}
 		}
 	})
 	t.Run("idle shutdown", func(t *testing.T) {
@@ -848,6 +851,13 @@ func TestContainerLifecycleNotices(t *testing.T) {
 		texts := noticeTexts(s.View().Members["iris"])
 		if len(texts) != 2 || !strings.Contains(texts[0], "is shutting down") || !strings.Contains(texts[1], "is still running") {
 			t.Fatalf("failed shutdown notices wrong: %v", texts)
+		}
+		outbox := s.View().Members["iris"].Outbox
+		if !outbox[0].Silent {
+			t.Fatal("idle shutdown notice would notify the user")
+		}
+		if outbox[1].Silent {
+			t.Fatal("a failed shutdown must stay visible to the user")
 		}
 	})
 }

@@ -1115,9 +1115,15 @@ func chunks(text string) []string {
 }
 
 // noticeContent builds one text message. A plain notice carries no formatted body, so the
-// reader sees the exact characters the bridge composed.
-func noticeContent(text string, plain bool) map[string]any {
-	content := map[string]any{"msgtype": "m.text", "body": text}
+// reader sees the exact characters the bridge composed. A silent notice is an m.notice, which
+// the default push rule .m.rule.suppress_notices matches, so clients display it without
+// notifying.
+func noticeContent(text string, plain, silent bool) map[string]any {
+	msgtype := "m.text"
+	if silent {
+		msgtype = "m.notice"
+	}
+	content := map[string]any{"msgtype": msgtype, "body": text}
 	if !plain {
 		content["format"] = "org.matrix.custom.html"
 		content["formatted_body"] = matrixFormat(text)
@@ -1177,7 +1183,7 @@ func (mx *Matrix) sendNext(ctx context.Context, s *Store, id string) error {
 	if n.MenuID != "" && n.EventID != "" {
 		return mx.seedMenu(ctx, s, id, n, bot)
 	}
-	content := noticeContent(parts[n.Sent], n.Plain)
+	content := noticeContent(parts[n.Sent], n.Plain, n.Silent)
 	if n.Thread != "" {
 		content["m.relates_to"] = map[string]any{"rel_type": "m.thread", "event_id": n.Thread, "is_falling_back": true, "m.in_reply_to": map[string]string{"event_id": n.Thread}}
 	}

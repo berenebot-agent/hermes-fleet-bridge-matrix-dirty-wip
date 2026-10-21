@@ -99,15 +99,20 @@ type Turn struct {
 type Notice struct {
 	ID, Room, Thread, Text string
 	Plain                  bool
-	MenuID                 string
-	EventID                string
-	Reaction               int
-	Sent                   int
-	Attempts               int
-	Next                   time.Time
-	Media                  *Attachment
-	TurnID                 string
-	Ciphertext             json.RawMessage `json:",omitempty"`
+	// Silent marks a container-lifecycle notice. It is delivered as an m.notice, which the
+	// default push rule .m.rule.suppress_notices matches, so a client shows it in the
+	// timeline without notifying. Only container state is silent: replies, menus and
+	// approval requests stay ordinary messages and still notify.
+	Silent     bool
+	MenuID     string
+	EventID    string
+	Reaction   int
+	Sent       int
+	Attempts   int
+	Next       time.Time
+	Media      *Attachment
+	TurnID     string
+	Ciphertext json.RawMessage `json:",omitempty"`
 }
 
 // Ciphertext is retained before acknowledging sync, including while keys are delayed.

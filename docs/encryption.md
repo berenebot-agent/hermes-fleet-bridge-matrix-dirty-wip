@@ -24,6 +24,10 @@ deployment on 2026-10-21. Fleet directories, templates and Hermes homes are not 
 - E2EE covers Matrix message contents and attachment bytes. Membership, room names,
   timestamps and standard reaction events remain visible. Reactions remain normal
   Matrix reaction events so existing menus work.
+- The `msgtype` is inside the encrypted payload, so it stays readable only by the room
+  members. Container start/ready/stop notices use `m.notice`; a client applies its push
+  rules to the decrypted event, so the default `.m.rule.suppress_notices` rule keeps
+  them out of notifications without any per-user push-rule management.
 - The bridge decrypts before sending to Hermes. Queue state, staged media,
   transcripts, Hermes history and provider requests can contain plaintext. Both
   homeserver and controller share a trusted host; host compromise defeats this

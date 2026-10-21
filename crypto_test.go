@@ -431,3 +431,85 @@ func TestEncryptedAttachmentIntegrity(t *testing.T) {
 		t.Fatal("corrupt ciphertext accepted")
 	}
 }
+
+// Container state is delivered as an m.notice, which the default push rule
+// .m.rule.suppress_notices matches, so a client shows it without notifying. A
+// reply stays an m.text. The msgtype sits inside the encrypted payload, so this
+// checks the decrypted content a client actually evaluates its push rules on.
+func TestLifecycleNoticeIsSilentAndReplyIsNot(t *testing.T) {
+	ctx := context.Background()
+	c, store := testStore(t)
+	f, server := newCryptoServer(t)
+	bot := Credential{User: "@agent_iris:chat.test", Token: "@agent_iris:chat.test", Password: "test-only-password"}
+	mx := &Matrix{Base: server.URL, c: c, crypto: map[string]*matrixCrypto{}, secrets: Secrets{Accounts: map[string]*Credential{"agent_iris": &bot}}}
+	if err := mx.initCrypto(ctx, "iris", bot); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(mx.closeCrypto)
+	if err := mx.ensureEncrypted(ctx, "iris", "!iris:chat.test"); err != nil {
+		t.Fatal(err)
+	}
+	humanConfig := c
+	humanConfig.Data = t.TempDir()
+	human := &Matrix{Base: server.URL, c: humanConfig, crypto: map[string]*matrixCrypto{}}
+	if err := human.initCrypto(ctx, "phone", Credential{User: "@admin:chat.test", Token: "@admin:chat.test", Password: "test-only-password"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(human.closeCrypto)
+	phone := human.cryptoFor("phone")
+	if _, err := phone.client.Members(ctx, "!iris:chat.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := phone.client.StateStore.SetEncryptionEvent(ctx, "!iris:chat.test", &event.EncryptionEventContent{Algorithm: id.AlgorithmMegolmV1}); err != nil {
+		t.Fatal(err)
+	}
+	// Cross-sign the phone so the bot is willing to encrypt for it.
+	if err := store.Update(func(st *State) error {
+		addNoticeFull(st.Members["iris"], &Notice{ID: "silent", Room: "!iris:chat.test", Text: "Agent iris is starting…", Silent: true})
+		addNoticeFull(st.Members["iris"], &Notice{ID: "loud", Room: "!iris:chat.test", Text: "the answer"})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sent := 0
+	for i := 0; i < 2; i++ {
+		if err := mx.sendNext(ctx, store, "iris"); err != nil {
+			t.Fatal(err)
+		}
+		sent++
+	}
+	f.mu.Lock()
+	sends := append([]json.RawMessage(nil), f.sends...)
+	deviceEvents := f.toDevice["@admin:chat.test"]
+	f.mu.Unlock()
+	if len(sends) != sent {
+		t.Fatalf("expected %d sends, got %d", sent, len(sends))
+	}
+	// The phone learns the Megolm session from the bot's to-device key share.
+	if err := human.cryptoSync(ctx, "phone", jsonBytes(map[string]any{"to_device": map[string]any{"events": deviceEvents}}), ""); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"Agent iris is starting…": "m.notice", "the answer": "m.text"}
+	for _, raw := range sends {
+		var encrypted event.EncryptedEventContent
+		if err := json.Unmarshal(raw, &encrypted); err != nil {
+			t.Fatal("invalid reply")
+		}
+		room := jsonBytes(map[string]any{"type": "m.room.encrypted", "event_id": "$reply", "origin_server_ts": time.Now().UnixMilli(), "sender": bot.User, "content": &encrypted})
+		got, err := human.decryptEvent(ctx, "phone", "!iris:chat.test", room)
+		if err != nil {
+			t.Fatal("phone could not decrypt reply", err)
+		}
+		kind, ok := want[got.Content.Body]
+		if !ok {
+			continue
+		}
+		if got.Content.MsgType != kind {
+			t.Fatalf("message %q had msgtype %q, want %q", got.Content.Body, got.Content.MsgType, kind)
+		}
+		delete(want, got.Content.Body)
+	}
+	if len(want) != 0 {
+		t.Fatalf("no message delivered for %v", want)
+	}
+}

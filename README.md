@@ -60,7 +60,9 @@ Container lifecycle is visible in the agent's own room: the agent says when it i
 starting, when it is ready, and when it is shutting down after the idle timeout or an
 operator Fleet stop. These are ordinary replies, so they arrive in order with
 everything else and survive a restart; a shutdown that fails is reported once instead
-of being retried silently.
+of being retried silently. Start, ready and stop are sent as `m.notice`, so the client
+shows them in the timeline without a notification — container state is not an
+interruption. A failed shutdown is an ordinary message and does notify.
 
 **Security:** no E2EE; the server can read messages. The supplied human account is
 a Matrix server administrator, as requested. Room membership is the access

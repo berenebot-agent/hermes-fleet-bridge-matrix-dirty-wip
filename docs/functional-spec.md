@@ -183,6 +183,10 @@ interaction follows Telegram-style New/Resume switching, not Matrix threads.
   room still reports in the agent's own room, so container state has one home.
 - These are ordinary reply-outbox messages: durable, ordered, retried, and free of
   secrets. A shutdown that fails is reported once; the retry does not repeat the message.
+- Start, ready and stop notices are sent as `m.notice`, which the default push rule
+  `.m.rule.suppress_notices` matches, so a client shows them in the timeline without
+  notifying the user. Container state is not an interruption. A **failed** shutdown is
+  still an ordinary message, because it reports a problem the user has to act on.
 
 **Idle shutdown:**
 

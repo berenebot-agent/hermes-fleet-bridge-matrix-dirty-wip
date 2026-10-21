@@ -420,14 +420,14 @@ func TestVoiceTranscriptNotice(t *testing.T) {
 	if len(m.Outbox) != 1 {
 		t.Fatal("voice transcript was queued twice")
 	}
-	content := noticeContent("*not emphasis*", true)
+	content := noticeContent("*not emphasis*", true, false)
 	if _, ok := content["format"]; ok {
 		t.Fatal("plain notice carried a formatted body")
 	}
 	if content["body"] != "*not emphasis*" {
 		t.Fatalf("plain notice body was altered: %v", content["body"])
 	}
-	if body := noticeContent("*emphasis*", false)["formatted_body"]; body != "<i>emphasis</i>" {
+	if body := noticeContent("*emphasis*", false, false)["formatted_body"]; body != "<i>emphasis</i>" {
 		t.Fatalf("unexpected formatted body %q", body)
 	}
 }

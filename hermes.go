@@ -118,13 +118,16 @@ func (e *Engine) readyAPI(ctx context.Context, m *Member) (string, int, error) {
 // lifecycleNote queues a container-lifecycle message in the agent's own room. The reply outbox
 // already delivers notices durably, in order and with retries, so no extra Matrix path is
 // needed. The notice ID carries a timestamp because every lifecycle event is distinct.
+// Container state is sent as an m.notice so a client shows it without notifying: the user
+// asked not to be interrupted by start/ready/stop. A failed shutdown stays an ordinary
+// message because it reports a problem the user has to act on.
 func (e *Engine) lifecycleNote(id, kind, text string) {
 	_ = e.s.Update(func(st *State) error {
 		m := st.Members[id]
 		if m == nil || m.Room == "" {
 			return nil
 		}
-		addNotice(m, id+"-"+kind+"-"+fmt.Sprintf("%d", time.Now().UnixNano()), m.Room, "", text)
+		addNoticeFull(m, &Notice{ID: id + "-" + kind + "-" + fmt.Sprintf("%d", time.Now().UnixNano()), Room: m.Room, Text: text, Silent: kind != "stop-failed"})
 		return nil
 	})
 }
