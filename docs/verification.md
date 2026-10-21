@@ -36,6 +36,27 @@ they opened.
   from this state event in the room's right-panel *Extensions* card; it does not
   support the `m.widget` message event type, which is why the panel is a room
   widget rather than a card in the timeline.
+- **Live end-to-end check on the running deployment.** The bridge was rebuilt
+  and restarted (`docker compose up -d --build`); it came up with
+  "ready: 9 fleet members". The `im.vector.modular.widgets` state event now
+  exists in the Fleet room and in every room an active agent serves, with the
+  room-scoped token in the URL fragment:
+
+  ```text
+  !jXAd3q6a…  -> https://fleet.bw.bendellar.com/widget/fleet?room=%21jXAd3q6a…#k=f83e052e…
+  ```
+
+  A room the agent was invited to but the administrator is not in has no panel:
+  the publishing bot has no power level there, and the bridge does not publish
+  state on the administrator's behalf in a room the administrator cannot see.
+  The reaction menu still works in that room.
+
+  The live endpoints behave as designed: `GET /widget/menu` with the room
+  token answers `200` with the open menu (empty when none is open), the same
+  call with a wrong token answers `404`, `POST /widget/select` without a user
+  token answers `401`, and with the administrator's real access token but no
+  open menu it answers `409`. The panel itself is served with
+  `200 text/html` and its content policy.
 - **Not established by these checks.** A press has not been exercised in a real
   Element Web session, and Element X behaviour is unchanged by design. The
   panel's first paint, its two-second refresh and a press against a live agent
