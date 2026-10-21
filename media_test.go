@@ -182,7 +182,7 @@ func TestMediaStateMigrationAndHeldRetention(t *testing.T) {
 	old.Version = 3
 	var restored State
 	changed, err := loadState(jsonBytes(old), &restored)
-	if err != nil || !changed || restored.Version != 4 || restored.Members["iris"].Room != old.Members["iris"].Room {
+	if err != nil || !changed || restored.Version != stateVersion || restored.Members["iris"].Room != old.Members["iris"].Room {
 		t.Fatal("version 3 identity not preserved")
 	}
 	s.Update(func(st *State) error {

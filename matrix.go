@@ -21,6 +21,7 @@ type Secrets struct {
 	Registration string
 	Accounts     map[string]*Credential
 	APIKeys      map[string]string
+	Retired      map[string]bool
 }
 type Matrix struct {
 	Base       string
@@ -68,6 +69,9 @@ func (m *Matrix) saveSecrets() error { return atomicFile(m.secretPath, jsonBytes
 func (m *Matrix) account(ctx context.Context, name string, admin bool) (Credential, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.secrets.Retired[name] {
+		return Credential{}, errors.New("Matrix account is retired; refuse login or recreation")
+	}
 	a := m.secrets.Accounts[name]
 	if a == nil {
 		password := randomSecret()
@@ -186,6 +190,7 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 		e = api(ctx, "GET", m.Base, "/_matrix/client/v3/directory/room/"+url.PathEscape(alias), bot.Token, nil, &r, nil)
 		if httpStatus(e, 404) {
 			body := map[string]any{"room_alias_name": "hermes_" + id, "name": id, "preset": "private_chat", "visibility": "private", "invite": []string{admin.User}, "creation_content": map[string]bool{"m.federate": false}, "initial_state": []any{map[string]any{"type": "org.hermes.fleet", "state_key": "", "content": map[string]string{"agent": id, "server": m.c.ServerName}}, map[string]any{"type": "m.room.history_visibility", "state_key": "", "content": map[string]string{"history_visibility": "joined"}}}}
+			body["name"] = agentName(member)
 			e = api(ctx, "POST", m.Base, "/_matrix/client/v3/createRoom", bot.Token, body, &r, nil)
 			if e != nil {
 				return errors.New("private room creation failed; alias is retained for safe reconciliation")
@@ -216,17 +221,25 @@ func (m *Matrix) provision(ctx context.Context, s *Store, id string) error {
 	if e = m.grantAdmin(ctx, r.Room, bot.Token, admin.User); e != nil {
 		return e
 	}
-	if e = m.nameBot(ctx, bot, id); e != nil {
+	if e = m.nameBot(ctx, bot, agentName(member)); e != nil {
 		return e
 	}
 	return s.Update(func(st *State) error {
 		member := st.Members[id]
+		firstFleetRoom := member.Controller && member.Room == ""
 		member.Room = r.Room
 		if member.Rooms == nil {
 			member.Rooms = map[string]*Room{}
 		}
 		if member.Rooms[r.Room] == nil {
 			member.Rooms[r.Room] = &Room{}
+		}
+		if member.InitialSessions != nil {
+			member.Sessions[r.Room] = member.InitialSessions
+			member.InitialSessions = nil
+		}
+		if firstFleetRoom {
+			fleetMenu(st, &Turn{ID: "fleet-welcome", Sender: admin.User}, "home", "", m.c.TemplateDir)
 		}
 		return nil
 	})
@@ -333,6 +346,9 @@ type invitedRoom struct {
 // because room membership is the access boundary. An invite from another bot is never
 // accepted: agents must not wake each other. A failed join is retried while the invite stands.
 func (mx *Matrix) acceptInvites(ctx context.Context, m *Member, bot Credential, invites map[string]invitedRoom) {
+	if m.Controller || m.Deleted {
+		return
+	}
 	for room, invited := range invites {
 		if _, known := m.Rooms[room]; !known && len(m.Rooms) >= maxRooms {
 			continue
@@ -614,6 +630,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	mx.acceptInvites(ctx, m, bot, response.Rooms.Invite)
 	scans := map[string]*roomScan{}
 	for room, joined := range response.Rooms.Join {
+		if m.Controller && room != m.Room {
+			continue
+		}
 		scan := &roomScan{mention: room != m.Room}
 		if known := m.Rooms[room]; known != nil {
 			scan.mention, scan.space, scan.last = known.Mention, known.Space, known.LastEvent
@@ -656,6 +675,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				continue
 			}
 			scan.last = ev.ID
+			if m.Controller && ev.Sender != "@"+mx.c.Admin+":"+mx.c.ServerName {
+				continue
+			}
 			if ev.Type == "m.reaction" && !botSender(ev.Sender) && ev.Content.Relation.Type == "m.annotation" {
 				scan.turns = append(scan.turns, &Turn{ID: ev.ID, Room: room, Sender: ev.Sender, MenuID: ev.Content.Relation.ID, Choice: ev.Content.Relation.Key, Text: "!menu-choice", Kind: "command", Phase: "queued", Created: time.Now().UTC()})
 				continue
@@ -692,6 +714,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 			if t.Media == nil && strings.HasPrefix(strings.TrimSpace(t.Text), "!") {
 				t.Kind = "command"
 			}
+			if m.Controller && (t.Kind != "command" || t.Thread != "") {
+				continue
+			}
 			// A command that does not address this agent is ambiguous once several fleet bots
 			// share the room, so refuse it with a pointer rather than acting in every bot at
 			// once. !stop stays global; a single-bot room and the agent's own provisioned room
@@ -712,6 +737,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 	}
 	return s.Update(func(st *State) error {
 		current := st.Members[id]
+		if current.Deleted {
+			return nil
+		}
 		if current.Rooms == nil {
 			current.Rooms = map[string]*Room{}
 		}
@@ -753,6 +781,9 @@ func (mx *Matrix) syncOnce(ctx context.Context, s *Store, id string) error {
 				if t.Thread != "" {
 					t.Phase = "done"
 					addNotice(current, t.ID+"-thread", room, "", "Thread prompts and commands are unsupported. Use this room’s main chat and !menu → Conversations → New / Resume. Existing thread history was preserved.")
+				} else if (current.Paused || current.Draining) && !fleetSafeControl(t) {
+					t.Phase = "done"
+					addNotice(current, t.ID+"-paused", room, "", "Agent is paused or draining for a fleet operation; no new work was admitted. Use the Fleet room to check or enable it.")
 				} else if !current.Enabled && t.Kind == "" {
 					if room != m.Room {
 						// A removed agent does not announce itself in operator-created rooms.

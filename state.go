@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const stateVersion = 4
+const stateVersion = 5
 const maxPending = 100
 
 // maxRooms bounds how many rooms one agent serves. Invites beyond it stay pending rather than
@@ -23,21 +23,27 @@ type State struct {
 	Version                      int
 	ServerName, PublicURL, Admin string
 	Members                      map[string]*Member
+	FleetOperation               *FleetOperation
+	FleetConfirmation            *FleetConfirmation
+	FleetDir, TemplateDir        string
 }
 type Member struct {
-	ID, Dir, Home, Project, Service, Network string
-	Files                                    []string
-	Port                                     int
-	Enabled                                  bool
-	SyncFailed                               bool
-	Room, Since                              string
-	Rooms                                    map[string]*Room
-	Sessions                                 map[string]map[string]*Session
-	Menus                                    map[string]*Menu
-	DefaultModel, DefaultProvider            string
-	Turns                                    []*Turn
-	Outbox                                   []*Notice
-	LastActivity                             time.Time
+	ID, Dir, Home, Project, Service, Network       string
+	Files                                          []string
+	Port                                           int
+	Enabled                                        bool
+	Name                                           string
+	Managed, Controller, Paused, Draining, Deleted bool
+	SyncFailed                                     bool
+	Room, Since                                    string
+	Rooms                                          map[string]*Room
+	Sessions                                       map[string]map[string]*Session
+	InitialSessions                                map[string]*Session
+	Menus                                          map[string]*Menu
+	DefaultModel, DefaultProvider                  string
+	Turns                                          []*Turn
+	Outbox                                         []*Notice
+	LastActivity                                   time.Time
 }
 
 // Room is one Matrix room this agent serves: its provisioned room, plus any room an approved
@@ -116,7 +122,7 @@ func loadState(b []byte, out *State) (bool, error) {
 	switch head.Version {
 	case stateVersion:
 		return false, json.Unmarshal(b, out)
-	case 2, 3:
+	case 2, 3, 4:
 		if err := json.Unmarshal(b, out); err != nil {
 			return false, err
 		}
@@ -257,6 +263,16 @@ func openStore(c Config) (*Store, error) {
 		f.Close()
 		return nil, errors.New("state identity/version differs from configuration; refuse reset or rename")
 	}
+	if s.state.FleetDir != "" && (s.state.FleetDir != c.FleetDir || s.state.TemplateDir != c.TemplateDir) {
+		f.Close()
+		return nil, errors.New("managed storage paths differ from persisted ownership; restore the original fleet configuration")
+	}
+	if op := s.state.FleetOperation; op != nil {
+		if !validFleetOperation(op, s.state) {
+			f.Close()
+			return nil, errors.New("invalid fleet operation state; refusing unsafe recovery")
+		}
+	}
 	for id, m := range s.state.Members {
 		if m == nil || m.ID != id || !localpart.MatchString(id) {
 			f.Close()
@@ -286,6 +302,12 @@ func openStore(c Config) (*Store, error) {
 					f.Close()
 					return nil, errors.New("invalid session state; restore a consistent backup")
 				}
+			}
+		}
+		for key, session := range m.InitialSessions {
+			if session == nil || session.ID == "" || (key != "room" && !strings.HasPrefix(key, "chat:")) {
+				f.Close()
+				return nil, errors.New("invalid initial copied conversation state")
 			}
 		}
 		for _, menu := range m.Menus {

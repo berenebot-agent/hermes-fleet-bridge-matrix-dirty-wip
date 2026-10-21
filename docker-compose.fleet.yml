@@ -1,0 +1,18 @@
+# Opt in with COMPOSE_FILE=docker-compose.yml:docker-compose.fleet.yml in .env.
+# Mount the parents, not individual agents: creation/deletion must survive recreation.
+services:
+  matrix:
+    environment:
+      FLEET_DIR: ${FLEET_DIR:?Set the absolute host managed-agent directory}
+      FLEET_TEMPLATE_DIR: ${FLEET_TEMPLATE_DIR:?Set the absolute host template directory}
+    volumes:
+      - type: bind
+        source: ${FLEET_DIR}
+        target: ${FLEET_DIR}
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${FLEET_TEMPLATE_DIR}
+        target: ${FLEET_TEMPLATE_DIR}
+        bind:
+          create_host_path: false

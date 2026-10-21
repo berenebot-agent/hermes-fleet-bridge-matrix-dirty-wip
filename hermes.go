@@ -12,13 +12,15 @@ import (
 )
 
 type Engine struct {
-	c       Config
-	s       *Store
-	mx      *Matrix
-	docker  *Docker
-	agents  map[string]*agentRuntime
-	wg      sync.WaitGroup
-	mediaMu sync.Mutex
+	c        Config
+	s        *Store
+	mx       *Matrix
+	docker   *Docker
+	agents   map[string]*agentRuntime
+	wg       sync.WaitGroup
+	mediaMu  sync.Mutex
+	agentsMu sync.Mutex
+	fleetMu  sync.Mutex
 }
 type agentRuntime struct {
 	mu          sync.Mutex
@@ -27,6 +29,7 @@ type agentRuntime struct {
 	commands    bool
 	controls    map[string]bool
 	lastMediaGC time.Time
+	started     bool
 }
 type runStatus struct {
 	ID       string `json:"run_id"`
@@ -93,10 +96,13 @@ func (e *Engine) readyAPI(ctx context.Context, m *Member) (string, int, error) {
 	return endpoint, cap.Features.Idempotency.Retention, nil
 }
 func (e *Engine) ensure(ctx context.Context, id, room string) (string, int, error) {
-	rt := e.agents[id]
+	rt := e.runtime(id)
 	rt.lifecycle.Lock()
 	defer rt.lifecycle.Unlock()
 	m := e.s.View().Members[id]
+	if m.Paused || m.Deleted {
+		return "", 0, errors.New("agent is paused or deleted")
+	}
 	endpoint, retention, err := e.readyAPI(ctx, m)
 	if err == nil {
 		return endpoint, retention, nil
@@ -166,7 +172,7 @@ func (e *Engine) fail(id, turn, message string, held bool) {
 	})
 }
 func (e *Engine) work(ctx context.Context, id, turn string) {
-	defer func() { rt := e.agents[id]; rt.mu.Lock(); delete(rt.busy, turn); rt.mu.Unlock() }()
+	defer func() { rt := e.runtime(id); rt.mu.Lock(); delete(rt.busy, turn); rt.mu.Unlock() }()
 	m := e.s.View().Members[id]
 	t := findTurn(m, turn)
 	if t == nil || t.Phase == "done" || t.Phase == "held" || t.Kind != "" {
@@ -425,8 +431,11 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	if ctx.Err() != nil {
 		return
 	}
-	rt := e.agents[id]
+	rt := e.runtime(id)
 	m := e.s.View().Members[id]
+	if m.Deleted {
+		return
+	}
 	rt.mu.Lock()
 	if rt.controls == nil {
 		rt.controls = map[string]bool{}
@@ -472,7 +481,11 @@ func (e *Engine) tick(ctx context.Context, id string) {
 		e.wg.Add(1)
 		go func(turn string, urgent bool) {
 			defer e.wg.Done()
-			e.command(ctx, id, turn)
+			if m.Controller {
+				e.fleetCommand(ctx, turn)
+			} else {
+				e.command(ctx, id, turn)
+			}
 			rt.mu.Lock()
 			delete(rt.controls, turn)
 			if !urgent {
@@ -480,6 +493,10 @@ func (e *Engine) tick(ctx context.Context, id string) {
 			}
 			rt.mu.Unlock()
 		}(t.ID, urgent)
+	}
+	if m.Controller {
+		rt.mu.Unlock()
+		return
 	}
 	sessions := map[string]bool{}
 	controls := map[string]bool{}
@@ -512,7 +529,7 @@ func (e *Engine) tick(ctx context.Context, id string) {
 	rt.mu.Unlock()
 }
 func (e *Engine) idle(ctx context.Context, id string) {
-	rt := e.agents[id]
+	rt := e.runtime(id)
 	if !rt.lifecycle.TryLock() {
 		return
 	}
@@ -523,7 +540,7 @@ func (e *Engine) idle(ctx context.Context, id string) {
 	m := e.s.View().Members[id]
 	busy := len(rt.busy) > 0 || len(rt.controls) > 0 || rt.commands
 	rt.mu.Unlock()
-	if !m.Enabled || busy || pending(m) > 0 || time.Since(m.LastActivity) < e.c.Idle {
+	if !m.Enabled || m.Controller || m.Deleted || m.Draining || busy || pending(m) > 0 || time.Since(m.LastActivity) < e.c.Idle {
 		return
 	}
 	endpoint, err := e.docker.endpoint(ctx, m)
@@ -552,89 +569,140 @@ func (e *Engine) idle(ctx context.Context, id string) {
 func (e *Engine) Start(ctx context.Context) {
 	members := e.s.View().Members
 	for id, m := range members {
-		if m.Room != "" {
-			e.agents[id] = &agentRuntime{busy: map[string]bool{}}
+		if m.Room != "" && !m.Deleted {
+			e.startMember(ctx, id)
 		}
 	}
-	for id, m := range members {
-		if m.Room == "" {
-			continue
-		}
-		id := id
-		e.wg.Add(4)
+	if e.c.FleetDir != "" {
+		e.wg.Add(1)
 		go func() {
 			defer e.wg.Done()
-			failures := 0
-			// Invitations are reconciled once per start: an incrementing sync only offers an
-			// invite relative to its cursor, so this is the only chance to see a pending one.
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					e.fleetStep(ctx)
+				}
+			}
+		}()
+	}
+}
+
+func (e *Engine) runtime(id string) *agentRuntime {
+	e.agentsMu.Lock()
+	defer e.agentsMu.Unlock()
+	if e.agents == nil {
+		e.agents = map[string]*agentRuntime{}
+	}
+	if e.agents[id] == nil {
+		e.agents[id] = &agentRuntime{busy: map[string]bool{}}
+	}
+	return e.agents[id]
+}
+
+func (e *Engine) startMember(ctx context.Context, id string) {
+	rt := e.runtime(id)
+	rt.mu.Lock()
+	if rt.started {
+		rt.mu.Unlock()
+		return
+	}
+	rt.started = true
+	rt.mu.Unlock()
+	e.wg.Add(4)
+	go func() {
+		defer e.wg.Done()
+		failures := 0
+		// Invitations are reconciled once per start: an incrementing sync only offers an
+		// invite relative to its cursor, so this is the only chance to see a pending one.
+		if !e.s.View().Members[id].Controller {
 			_ = e.mx.reconcileInvites(ctx, e.s, id)
-			for ctx.Err() == nil {
-				if err := e.mx.syncOnce(ctx, e.s, id); err != nil {
-					failures++
-					if httpStatus(err, 401) {
-						_, _ = e.mx.account(ctx, "agent_"+id, false)
-					}
-					if failures >= 3 && !e.s.View().Members[id].SyncFailed {
-						_ = e.s.Update(func(st *State) error { st.Members[id].SyncFailed = true; return nil })
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(5 * time.Second):
-					}
-				} else {
-					failures = 0
-					if e.s.View().Members[id].SyncFailed {
-						_ = e.s.Update(func(st *State) error { st.Members[id].SyncFailed = false; return nil })
-					}
-				}
+		}
+		for ctx.Err() == nil {
+			if e.s.View().Members[id].Deleted {
+				return
 			}
-		}()
-		go func() {
-			defer e.wg.Done()
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
+			if err := e.mx.syncOnce(ctx, e.s, id); err != nil {
+				failures++
+				if httpStatus(err, 401) && !e.s.View().Members[id].Deleted {
+					_, _ = e.mx.account(ctx, "agent_"+id, false)
+				}
+				if failures >= 3 && !e.s.View().Members[id].SyncFailed {
+					_ = e.s.Update(func(st *State) error { st.Members[id].SyncFailed = true; return nil })
+				}
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
-					e.tick(ctx, id)
+				case <-time.After(5 * time.Second):
+				}
+			} else {
+				failures = 0
+				if e.s.View().Members[id].SyncFailed {
+					_ = e.s.Update(func(st *State) error { st.Members[id].SyncFailed = false; return nil })
 				}
 			}
-		}()
-		go func() {
-			defer e.wg.Done()
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
+		}
+	}()
+	go func() {
+		defer e.wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if e.s.View().Members[id].Deleted {
 					return
-				case <-ticker.C:
-					_ = e.mx.sendNext(ctx, e.s, id)
 				}
+				e.tick(ctx, id)
 			}
-		}()
-		go func() {
-			defer e.wg.Done()
-			ticker := time.NewTicker(5 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
+		}
+	}()
+	go func() {
+		defer e.wg.Done()
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if e.s.View().Members[id].Deleted {
 					return
-				case <-ticker.C:
-					e.idle(ctx, id)
-					rt := e.agents[id]
-					if time.Since(rt.lastMediaGC) > time.Minute {
-						e.cleanMedia(id)
-						rt.lastMediaGC = time.Now()
-					}
+				}
+				_ = e.mx.sendNext(ctx, e.s, id)
+			}
+		}
+	}()
+	go func() {
+		defer e.wg.Done()
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				m := e.s.View().Members[id]
+				if m.Deleted {
+					return
+				}
+				if m.Controller || m.Draining {
+					continue
+				}
+				e.idle(ctx, id)
+				rt := e.runtime(id)
+				if time.Since(rt.lastMediaGC) > time.Minute {
+					e.cleanMedia(id)
+					rt.lastMediaGC = time.Now()
 				}
 			}
-		}()
-	}
+		}
+	}()
 }
 
 const helpText = `Hermes fleet commands (send as plain text):

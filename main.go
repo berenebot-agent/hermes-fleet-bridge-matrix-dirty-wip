@@ -19,6 +19,9 @@ import (
 )
 
 func reconcile(ctx context.Context, c Config, s *Store, mx *Matrix, d *Docker) error {
+	if c.FleetDir != "" {
+		return reconcileFleet(ctx, c, s, mx, d)
+	}
 	incoming := map[string]*Member{}
 	projects := map[string]bool{}
 	ports := map[int]bool{}
@@ -60,6 +63,9 @@ func reconcile(ctx context.Context, c Config, s *Store, mx *Matrix, d *Docker) e
 	}
 	return s.Update(func(st *State) error {
 		for id, m := range st.Members {
+			if m.Managed || m.Controller {
+				return errors.New("managed fleet state exists; restore FLEET_DIR and FLEET_TEMPLATE_DIR rather than disabling management")
+			}
 			if incoming[id] == nil {
 				m.Enabled = false
 				for _, t := range m.Turns {
@@ -179,7 +185,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	for id, m := range s.View().Members {
-		if m.Enabled {
+		if m.Enabled && !m.Deleted {
 			if err = mx.provision(workCtx, s, id); err != nil {
 				return fmt.Errorf("agent %s Matrix provisioning failed: %w", id, err)
 			}

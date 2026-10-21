@@ -12,7 +12,7 @@ import (
 const menuPageSize = 5
 const maxConversations = 1000
 
-var menuKeys = []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"}
+var menuKeys = []string{"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣"}
 
 // Menus are local, single-use capabilities, not commands supplied by Matrix text.
 type Menu struct {

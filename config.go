@@ -23,6 +23,7 @@ type Config struct {
 	Overrides                                                                  map[string]Override
 	Idle, Start                                                                time.Duration
 	Parallel                                                                   int
+	FleetDir, TemplateDir                                                      string
 }
 type Override struct {
 	Service string `json:"service"`
@@ -65,6 +66,21 @@ func loadConfig() (c Config, err error) {
 		return c, errors.New("ADMIN_PASSWORD must contain at least 16 characters and no line breaks")
 	}
 	c.Data = env("DATA_DIR", "/data")
+	c.FleetDir = os.Getenv("FLEET_DIR")
+	c.TemplateDir = os.Getenv("FLEET_TEMPLATE_DIR")
+	if (c.FleetDir == "") != (c.TemplateDir == "") {
+		return c, errors.New("FLEET_DIR and FLEET_TEMPLATE_DIR must be configured together")
+	}
+	if c.FleetDir != "" {
+		for _, p := range []string{c.FleetDir, c.TemplateDir} {
+			if !filepath.IsAbs(p) || filepath.Clean(p) != p || p == "/" {
+				return c, errors.New("fleet storage paths must be clean absolute directories, not root")
+			}
+		}
+		if pathWithin(c.FleetDir, c.TemplateDir) || pathWithin(c.TemplateDir, c.FleetDir) || pathWithin(c.FleetDir, c.Data) || pathWithin(c.TemplateDir, c.Data) {
+			return c, errors.New("fleet, template and bridge data directories must not overlap")
+		}
+	}
 	if !filepath.IsAbs(c.Data) {
 		return c, errors.New("DATA_DIR must be absolute")
 	}
@@ -105,9 +121,13 @@ func loadConfig() (c Config, err error) {
 		if !filepath.IsAbs(p) {
 			return c, errors.New("HERMES_DIRS entries must be absolute")
 		}
-		p, e = filepath.EvalSymlinks(p)
-		if e != nil {
-			return c, errors.New("a configured member directory is unavailable")
+		if c.FleetDir == "" {
+			p, e = filepath.EvalSymlinks(p)
+			if e != nil {
+				return c, errors.New("a configured member directory is unavailable")
+			}
+		} else if filepath.Dir(p) != c.FleetDir {
+			return c, errors.New("managed agents must be direct children of FLEET_DIR")
 		}
 		id := filepath.Base(p)
 		if !localpart.MatchString(id) || seen[id] {

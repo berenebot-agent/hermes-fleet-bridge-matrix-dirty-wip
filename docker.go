@@ -97,7 +97,7 @@ type composeService struct {
 
 func (d *Docker) discover(ctx context.Context, dir string, o Override) (*Member, error) {
 	m := &Member{ID: filepath.Base(dir), Dir: dir, Enabled: true, Network: o.Network, Port: o.Port, Rooms: map[string]*Room{}, Sessions: map[string]map[string]*Session{}, LastActivity: time.Now().UTC()}
-	for _, name := range []string{"compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"} {
+	for _, name := range []string{"fleet-compose.json", "compose.yaml", "compose.yml", "docker-compose.yml", "docker-compose.yaml"} {
 		p := filepath.Join(dir, name)
 		if i, e := os.Stat(p); e == nil && !i.IsDir() {
 			m.Files = []string{p}
@@ -185,6 +185,9 @@ func quoteEnd(s string, q byte) int {
 	return -1
 }
 func configureEnv(path, host string, port int) (string, error) {
+	return configureEnvKey(path, host, port, false)
+}
+func configureEnvKey(path, host string, port int, rotate bool) (string, error) {
 	info, e := os.Lstat(path)
 	if e == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
 		return "", errors.New("member data/.env must be a regular file, not a symlink")
@@ -241,7 +244,7 @@ func configureEnv(path, host string, port int) (string, error) {
 		return "", errors.New("unterminated quoted value in member data/.env")
 	}
 	key := values["API_SERVER_KEY"]
-	if key == "" {
+	if key == "" || rotate {
 		key = randomSecret()
 		managed["API_SERVER_KEY"] = key
 	} else if !strongKey(key) {

@@ -589,6 +589,9 @@ func (e *Engine) cleanMedia(id string) {
 	e.mediaMu.Lock()
 	defer e.mediaMu.Unlock()
 	m := e.s.View().Members[id]
+	if m.Draining || m.Deleted {
+		return
+	}
 	for _, t := range m.Turns {
 		if t.Phase != "done" || t.MediaCleaned || t.Completed.IsZero() || time.Since(t.Completed) < mediaRetention {
 			continue

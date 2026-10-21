@@ -99,7 +99,13 @@ Persist credentials before creating accounts, use deterministic room aliases and
 
 ## 5. Agent discovery, accounts and rooms
 
-The source of truth is `HERMES_DIRS`, not an incidental list of running containers. Directory basename is the default stable agent ID and room display name.
+Without optional Fleet management, the source of truth is `HERMES_DIRS`, not an incidental list of running containers. Directory basename is the default stable agent ID and room display name.
+
+**Managed Fleet extension:** When `FLEET_DIR` and `FLEET_TEMPLATE_DIR` are configured, `HERMES_DIRS` enrols existing members and durable controller state also owns members created through the private operator-only Fleet room. Its compact, flat agent menu supports start, shutdown, pause/enable, full duplication, full-snapshot template saving, creation from clean/full templates and guarded permanent deletion. New identities are independent of reusable display names. All writable agent storage is self-contained under the mounted managed parent; future connected-only membership must not imply deletion authority. Fleet operations drain admitted work, persist progress and fail closed across restart; permanent deletion retains Matrix history. Detailed ownership, confirmations, snapshot semantics, setup and limits are in [fleet.md](fleet.md). Legacy membership-removal behaviour below applies only without this extension.
+
+Managed Fleet is an opt-in addition to the original V1 boundaries below, not a
+replacement for the default existing-directory deployment. It does not add a
+service, dependency, public registration endpoint, or Matrix-history deletion.
 
 For each valid project:
 

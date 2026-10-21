@@ -300,7 +300,14 @@ UTF-8-safe reply chunks; 8 MiB remote JSON responses; 64 MiB controller state;
 recent event IDs remain for deduplication. Hitting a durability/storage safety
 limit stops the controller rather than acknowledging data it cannot persist.
 
-Recreate the service after editing membership/mounts. Adding an agent provisions
+Optional **[Fleet management](docs/fleet.md)** adds a private operator-only room
+for start/shutdown/pause/enable, clean-template creation, full copies, saved full
+snapshot templates and exact-name-confirmed permanent deletion. All agent actions
+are on one menu, with no More submenu. It uses a managed parent-directory mount
+and an optional Compose override; existing deployments are not silently migrated.
+Matrix history is retained when an agent is deleted.
+
+Without Fleet management, recreate the service after editing membership/mounts. Adding an agent provisions
 its room; removing one disables new dispatch, cancels queued turns, drains admitted
 runs, and keeps rooms/history/mappings. The bridge does not automatically retire
 the removed project's containers. Removing every member does not wipe Matrix.

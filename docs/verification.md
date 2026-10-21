@@ -3,6 +3,32 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
+## Managed Fleet extension — 2026-10-21
+
+Added 17 fake-endpoint Fleet tests: flat single-use menus and initial room menu;
+operator/room restrictions and refused invitations; confirmation expiry; draining
+and authenticated idle checks; pause/enable persistence; full-copy credential
+separation; clean/full template creation; retry and published-directory recovery;
+source restart after a stopped snapshot; deletion recovery and retirement; retained
+history/name reuse; unowned-destination, symlink and nested-mount refusal.
+
+Validation uses the pinned Docker Go wrapper (`gofmt -l .`, `vet ./...`,
+`test -race ./...`, and a standalone build into the toolchain container's `/tmp`).
+The optional Compose override also passes `docker compose config --quiet` with
+fake configuration credentials. Full runner logs remain under the gitignored
+`tests/logs/hermes-fleet-bridge-matrix-go/` directory.
+
+Tuwunel account-deactivation support was checked against the pinned v1.9.2 source:
+`src/api/client/admin/users/deactivate_account.rs` and `src/service/deactivate/mod.rs`.
+The administrator route accepts `erase: false`, disables the account, clears its
+profile and leaves its rooms without erasing message history. Local tests verify
+the request shape and disclose remote failure; no live account was deactivated.
+
+No live deployment, real fleet lifecycle changes, provider calls or real homeserver
+tests were performed for this extension. Existing local `docker-compose.yml`
+changes were preserved; deployment opt-in/mount changes are documented in
+[fleet.md](fleet.md).
+
 ## Exact artifacts
 
 - Tuwunel `v1.9.2`, image digest

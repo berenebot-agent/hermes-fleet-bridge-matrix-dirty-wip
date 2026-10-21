@@ -36,6 +36,9 @@ func frontend(c Config, s *Store, ready *atomic.Bool) http.Handler {
 			state := s.View()
 			held, blocked, syncFailed := 0, 0, 0
 			for _, m := range state.Members {
+				if m.Deleted {
+					continue
+				}
 				if m.SyncFailed {
 					syncFailed++
 				}
