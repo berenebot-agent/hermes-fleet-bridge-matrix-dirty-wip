@@ -46,6 +46,12 @@ func TestFrontendServesEncryptionSetupOverride(t *testing.T) {
 	if strings.Contains(body, "SHOW_ENCRYPTION_SETUP_UI: undefined") {
 		t.Fatal("module leaves the flag undefined; the client would still prompt")
 	}
+	// Element calls emit() on every registered module for each lifecycle event.
+	// A module without it stops the client with "Your Element is misconfigured",
+	// so the method has to survive every edit of the module source.
+	if !strings.Contains(body, "emit() {}") {
+		t.Fatal("module has no emit(); Element would fail to start")
+	}
 }
 
 // Nothing is served before provisioning completes, including the module.

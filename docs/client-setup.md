@@ -44,9 +44,13 @@ lists it in `/config.json`'s `modules` array. At startup the module registers a
 `cryptoSetup` extension reporting `SHOW_ENCRYPTION_SETUP_UI: false`, and Element's
 `postLoginSetup` then goes straight to the room list.
 
-Element's default leaves that flag `undefined`, and the client tests
-`0 == SHOW_ENCRYPTION_SETUP_UI`, which is false for `undefined` — a real boolean
-`false` is what makes the check pass.
+Element's default extension reports that flag as `true`, and the client skips the
+prompt only when the flag compares equal to `false` — a real boolean `false` is
+what makes the check pass.
+
+The module must also expose an `emit` method. Element calls `emit` on every
+registered module for each lifecycle event, and a module without it stops the
+client with "Your Element is misconfigured" before the login screen appears.
 
 This is a UI suppression, not a crypto fix: device verification, cross-signing and
 key storage remain available in Settings and keep whatever state the clients gave

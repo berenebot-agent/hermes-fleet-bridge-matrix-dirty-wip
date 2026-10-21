@@ -8,10 +8,14 @@ package main
 // room unencrypted (see spec §10), so there is nothing for it to set up. Element X
 // is not affected: it ignores config.json and forces cross-signing on its own.
 //
-// Element's default extension leaves SHOW_ENCRYPTION_SETUP_UI undefined, and the
-// client tests `0 == SHOW_ENCRYPTION_SETUP_UI`, which is false for undefined. A
-// real boolean false makes that test pass, so postLoginSetup goes straight to the
-// room list.
+// Element's default extension reports SHOW_ENCRYPTION_SETUP_UI as true, and the
+// client skips the prompt only when the flag compares equal to false. A real
+// boolean false is what makes that test pass, so postLoginSetup goes straight to
+// the room list.
+//
+// Element calls emit() on every registered module for each lifecycle event (its
+// own modules are EventEmitters). A module without emit stops the client with
+// "Your Element is misconfigured", so the method below is required, not optional.
 //
 // shortcut: reaches into Element's internal _registerLegacyModule (the documented
 // module API cannot set extensions). If a future Element removes it, the client
@@ -19,6 +23,7 @@ package main
 const elementModule = `class CryptoSetupExtension {
   constructor(api) {
     this.api = api;
+    this.moduleName = "HermesFleetNoEncryptionSetup";
     this.extensions = {
       cryptoSetup: {
         SHOW_ENCRYPTION_SETUP_UI: false,
@@ -32,13 +37,18 @@ const elementModule = `class CryptoSetupExtension {
       },
     };
   }
+  emit() {}
   async load() {
     const api = this.api || window.mxModuleApi;
     if (!api || typeof api._registerLegacyModule !== "function") {
       console.warn("fleet: Element module API unavailable; keeping the stock encryption setup screen");
       return;
     }
-    api._registerLegacyModule(CryptoSetupExtension);
+    try {
+      await api._registerLegacyModule(CryptoSetupExtension);
+    } catch (e) {
+      console.warn("fleet: could not register the Element module:", e);
+    }
   }
 }
 CryptoSetupExtension.moduleApiVersion = ">=1.12.0";

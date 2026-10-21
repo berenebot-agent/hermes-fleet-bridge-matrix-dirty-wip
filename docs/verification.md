@@ -3,6 +3,36 @@
 Review/build date: **2026-10-19**. Host UTC test logs are dated 2026-10-18.
 Tests were explicitly authorized. No subagents were used.
 
+## Element Web encryption setup module — 2026-10-21
+
+The bundled Web client failed to start with "Your Element is misconfigured —
+`n.module.emit is not a function`". The module served in `config.json`'s
+`modules` array registered a `cryptoSetup` extension, but Element calls
+`emit()` on every registered module for each lifecycle event and the module
+had none, so `loadApp` threw before the login screen rendered.
+
+The module now exposes `emit`, names itself, and swallows a failing
+registration so a future Element change degrades to a warning instead of
+breaking the client. The comment that claimed Element's default extension
+leaves `SHOW_ENCRYPTION_SETUP_UI` undefined was wrong: the bundled default
+reports `true`, and the client skips the prompt only on a real boolean
+`false`. The same correction landed in `docs/client-setup.md`.
+
+Verified against the rebuilt deployment: a fresh browser on the public URL
+previously showed the misconfiguration page, and now loads the login screen
+with the module registered and `SHOW_ENCRYPTION_SETUP_UI` reported as `false`.
+
+Passed through the Docker wrapper: `gofmt -l .`, `vet ./...` and the full local
+`test -race ./...` suite. The added assertion fails if the served module loses
+its `emit` method.
+
+Log: `tests/logs/hermes-fleet-bridge-matrix-go/20261021T085426-go-test_-race_._...-2455388.log`.
+
+Unrelated findings, left alone: Element's own widget stores log
+`Cannot access 'B' before initialization` (upstream circular import, present
+with the module removed too), and the client 404s on `config.<host>.json` and
+on Tuwunel's missing `auth_metadata` endpoints.
+
 ## Fleet name prompt — 2026-10-21
 
 Copy agent, Save as template and the template list now ask for the destination
