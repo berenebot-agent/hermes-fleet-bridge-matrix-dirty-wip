@@ -340,6 +340,15 @@ func (m *Matrix) grantAdmin(ctx context.Context, room, token, user string) error
 	return api(ctx, "PUT", m.Base, roomPath(room)+"/state/m.room.power_levels/", token, levels, nil, nil)
 }
 
+// purgeRoom erases a deleted agent's own room. Tuwunel evicts every local member
+// (so the room leaves the operator's room list), removes the room's local aliases
+// and purges its stored events, so the agent's Matrix history is erased rather than
+// retained. Purging an already-purged room succeeds, so a retried delete is safe.
+func (mx *Matrix) purgeRoom(ctx context.Context, room string) error {
+	admin := mx.cred(mx.c.Admin)
+	return api(ctx, "DELETE", mx.Base, "/_synapse/admin/v1/rooms/"+url.PathEscape(room), admin.Token, map[string]any{"purge": true, "block": true}, nil, nil)
+}
+
 type Event struct {
 	Raw       json.RawMessage `json:"-"`
 	Decrypted bool            `json:"-"`

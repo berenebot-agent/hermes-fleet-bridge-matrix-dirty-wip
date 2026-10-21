@@ -1,5 +1,32 @@
 # MVP verification
 
+## Deleted-agent Matrix room purge — 2026-10-21
+
+`!fleet delete` now erases the deleted agent's own Matrix room instead of
+retaining it. Tuwunel 1.9.2's administrator delete-room endpoint (`purge` and
+`block`) evicts every local member, so the room leaves the operator's room
+list, releases the room's local alias and purges its stored events. The Fleet
+room and operator-created rooms are never purged. This reverses the earlier
+"permanent deletion retains Matrix history" promise, so the spec, README and
+fleet contract changed with the code.
+
+- `gofmt -l .` passed (final formatting gate).
+- `go vet ./...` passed: wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T125827-go-vet_._...-2927344.log`.
+- `go test -race -count=1 ./...` passed (23.094s test time): wrapper log
+  `tests/logs/hermes-fleet-bridge-matrix-go/20261021T125832-go-test_-race_-count=1_._...-2927679.log`.
+- New fake-endpoint coverage: the delete purges exactly the deleted agent's own
+  room, with `purge` and `block` set, under the administrator token; a failed
+  purge holds the operation with dispatch already disabled and `!fleet retry`
+  completes it; a failed deactivation still retires the credentials and is
+  disclosed.
+- The purge runs before the bot account is deactivated, so a held purge leaves
+  the account intact and the retry path stays clean. Purging an already-purged
+  room succeeds, so the retry is idempotent.
+- **Not run for this change:** the real-provider and browser checks below. The
+  live purge of already-deleted agents' rooms was run separately against the
+  running homeserver.
+
 ## Direct-conversation reply mode — 2026-10-21
 
 An invited room that holds only the agent's bot and one other human member is a

@@ -395,7 +395,7 @@ no account, room or bridge involvement. A baked template starts its agents in
 seconds instead of performing the install on first use, and it contains no live
 sockets afterwards.
 
-## Permanent deletion and retained Matrix history
+## Permanent deletion and erased Matrix history
 
 Delete shows the agent and exact scope, then requires a command like:
 
@@ -414,6 +414,15 @@ idempotently after a partial failure/restart; it never crosses the managed paren
 follows a symlink root or erases another project's storage. No archive, restore,
 force-stop or built-in undo is provided.
 
+The agent's own Matrix room is then erased with Tuwunel 1.9.2's administrator
+delete-room endpoint (`purge` and `block`): every local member is evicted, the
+room leaves the operator's room list, its local alias is released and its stored
+events are purged. Only that agent's own room is touched — the Fleet room and
+operator-created rooms are never purged. The purge runs before the bot account is
+deactivated, so a failed purge holds the operation for `!fleet retry` with the
+account still intact; purging an already-purged room succeeds, so the retry is
+safe.
+
 The bot is removed from active Fleet menus. The controller uses Tuwunel 1.9.2's
 administrator deactivation endpoint with `erase: false`, retires the account from
 future bridge login/recreation and removes its bridge-held API/account credentials.
@@ -421,10 +430,10 @@ If remote deactivation fails, completion explicitly reports that it was unconfir
 dispatch is still permanently disabled. A host-side administrator can reconcile
 that Matrix account separately.
 
-**Retained:** Matrix rooms, DMs, messages, historical references, saved templates,
-other full copies and shared Docker images. Deactivation clears the bot's profile
-and leaves its rooms, not the operator's rooms. It cannot promise disappearance
-from every Element cache, historical member list or existing DM.
+**Erased:** the agent's own Matrix room, its messages and its DM history.
+**Retained:** saved templates, other full copies, shared Docker images, and the
+controller tombstone's identity/room mapping. It cannot promise disappearance
+from every Element cache or from another client's local history.
 
 A deleted display name can be reused after a warning and a separate short-lived
 confirmation (`confirm-create` or `confirm-copy`). The replacement gets a fresh

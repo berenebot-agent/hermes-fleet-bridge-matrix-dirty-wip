@@ -250,7 +250,7 @@ Rename agent, Copy agent, Save as template and the template list ask for the new
 just the name. An invalid name keeps the prompt alive; !fleet cancel ends it.
 Rename changes the bot display name and dedicated room name, not directories, containers or history.
 
-Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Copies and agents created from templates start ready to receive work. Delete permanently erases agent files, not Matrix history, templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
+Shutdown allows the next message to wake the agent. Pause drains work and shuts down, preventing wake until enabled. Copies and agents created from templates start ready to receive work. Delete permanently erases agent files and the agent's own Matrix room, not templates or other copies. Templates can contain private data and provider credentials. No secrets should be pasted into this room.`
 
 func fleetReply(st *State, t *Turn, text string) {
 	m := st.Members[fleetID]
@@ -527,7 +527,7 @@ func (e *Engine) fleetCommand(ctx context.Context, turn string) {
 			cf := &FleetConfirmation{Action: "delete", Target: a.ID, Name: agentName(a), Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
 			st.FleetConfirmation = cf
 			st.FleetPrompt = nil
-			fleetReply(st, t, "Permanently delete "+cf.Name+"?\nErase this agent's containers and managed directory, including files, memories, history and credentials. Drain admitted work first; never force-kill. Retain Matrix rooms/messages, saved templates, other copies and shared images. Remove from Fleet menus and attempt Matrix account deactivation.\nConfirm within five minutes:\n!fleet confirm-delete "+cf.Name+" "+cf.Code+"\n!fleet cancel to cancel.")
+			fleetReply(st, t, "Permanently delete "+cf.Name+"?\nErase this agent's containers and managed directory, including files, memories, history and credentials, and purge its Matrix room with all its messages. Drain admitted work first; never force-kill. Retain saved templates, other copies and shared images. Remove from Fleet menus and attempt Matrix account deactivation.\nConfirm within five minutes:\n!fleet confirm-delete "+cf.Name+" "+cf.Code+"\n!fleet cancel to cancel.")
 		case "enable":
 			a.Paused = false
 			fleetReply(st, t, agentName(a)+" is available for message-triggered wake.")
@@ -662,7 +662,7 @@ func (e *Engine) fleetBeginNamed(st *State, t *Turn, action, template string, a 
 				cf := &FleetConfirmation{Action: "copy", Name: name, Source: a.ID, Target: name + "-" + randomSecret()[:12], Code: randomSecret()[:8], Owner: t.Sender, Expires: time.Now().Add(5 * time.Minute)}
 				st.FleetConfirmation = cf
 				st.FleetPrompt = nil
-				fleetReply(st, t, "Warning: this name has retained Matrix history. The copy gets a fresh identity and room. Confirm within five minutes:\n!fleet confirm-copy "+name+" "+cf.Code)
+				fleetReply(st, t, "Warning: this name belonged to a deleted agent. The copy gets a fresh identity and room; the deleted agent's own room was erased with it. Confirm within five minutes:\n!fleet confirm-copy "+name+" "+cf.Code)
 				return
 			}
 		}
@@ -854,12 +854,20 @@ func (e *Engine) runFleetOperation(ctx context.Context, op *FleetOperation) erro
 		if err := deleteFleetTree(e.c.FleetDir, a.Dir); err != nil {
 			return err
 		}
+		// The room goes before the bot is deactivated, so a failed purge leaves the
+		// account intact and the retry stays clean. Only the agent's own room is
+		// purged; operator-created rooms and the Fleet room are untouched.
+		if a.Room != "" {
+			if err := e.mx.purgeRoom(ctx, a.Room); err != nil {
+				return errors.New("Matrix room purge failed: " + err.Error() + "; retry to erase the deleted agent's room")
+			}
+		}
 		warning := ""
 		if err := e.mx.deactivateAgent(ctx, a.ID); err != nil {
 			if !errors.Is(err, errDeactivationUnavailable) {
 				return err
 			}
-			warning = " Matrix account deactivation could not be confirmed; bridge dispatch is permanently disabled. Rooms and messages remain."
+			warning = " Matrix account deactivation could not be confirmed; bridge dispatch is permanently disabled."
 		}
 		return e.finishFleet(op, warning)
 	}

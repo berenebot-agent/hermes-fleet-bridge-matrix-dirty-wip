@@ -29,7 +29,14 @@ func writeFleetFixture(t *testing.T, dir, name string) {
 	}
 }
 
-func fleetFixture(t *testing.T) (*Engine, context.Context, *atomic.Int32, string) {
+// fleetCalls records the destructive Matrix admin calls the fake homeserver sees.
+type fleetCalls struct {
+	deactivations atomic.Int32
+	purges        atomic.Int32
+	purgedRoom    atomic.Pointer[string]
+}
+
+func fleetFixture(t *testing.T) (*Engine, context.Context, *fleetCalls, string) {
 	t.Helper()
 	c, s := testStore(t)
 	root := t.TempDir()
@@ -54,7 +61,7 @@ func fleetFixture(t *testing.T) (*Engine, context.Context, *atomic.Int32, string
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	deactivations := &atomic.Int32{}
+	calls := &fleetCalls{}
 	mx := fakeMatrix(t, c, func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		switch {
@@ -64,8 +71,17 @@ func fleetFixture(t *testing.T) (*Engine, context.Context, *atomic.Int32, string
 			if body.Erase || r.Header.Get("Authorization") != "Bearer private-admin-token" {
 				t.Error("unsafe deactivation request")
 			}
-			deactivations.Add(1)
+			calls.deactivations.Add(1)
 			replyJSON(w, map[string]string{"id_server_unbind_result": "success"})
+		case strings.Contains(p, "/admin/v1/rooms/"):
+			var body struct{ Purge, Block bool }
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if r.Method != "DELETE" || !body.Purge || !body.Block || r.Header.Get("Authorization") != "Bearer private-admin-token" {
+				t.Error("unsafe room purge request")
+			}
+			calls.purges.Add(1)
+			calls.purgedRoom.Store(&p)
+			replyJSON(w, map[string]any{})
 		case strings.HasSuffix(p, "/sync"):
 			<-r.Context().Done()
 		case strings.HasSuffix(p, "/whoami"):
@@ -111,7 +127,7 @@ func fleetFixture(t *testing.T) (*Engine, context.Context, *atomic.Int32, string
 	e := &Engine{c: c, s: s, mx: mx, docker: &Docker{client: &http.Client{Transport: rewriteTransport{u, http.DefaultTransport}}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); e.wg.Wait() })
-	return e, ctx, deactivations, log
+	return e, ctx, calls, log
 }
 
 func fleetTestCommand(t *testing.T, e *Engine, ctx context.Context, text string) string {
@@ -423,7 +439,7 @@ func TestFleetRenamePermissionAndPromptExpiry(t *testing.T) {
 }
 
 func TestFleetDeleteConfirmationDrainAndRetire(t *testing.T) {
-	e, ctx, deactivations, log := fleetFixture(t)
+	e, ctx, calls, log := fleetFixture(t)
 	dir := e.s.View().Members["iris"].Dir
 	fleetTestCommand(t, e, ctx, "!fleet delete iris")
 	cf := e.s.View().FleetConfirmation
@@ -451,8 +467,16 @@ func TestFleetDeleteConfirmationDrainAndRetire(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal("managed data not erased")
 	}
-	if deactivations.Load() != 1 || !e.s.View().Members["iris"].Deleted || e.mx.key("iris") != "" {
+	if calls.deactivations.Load() != 1 || !e.s.View().Members["iris"].Deleted || e.mx.key("iris") != "" {
 		t.Fatal("deleted agent not retired")
+	}
+	if calls.purges.Load() != 1 {
+		t.Fatal("deleted agent's Matrix room was not purged")
+	}
+	if p := calls.purgedRoom.Load(); p == nil {
+		t.Fatal("purged room was not the deleted agent's own room")
+	} else if room, err := url.PathUnescape(*p); err != nil || !strings.HasSuffix(room, "/!iris:chat.test") {
+		t.Fatalf("purged room was not the deleted agent's own room: %s", *p)
 	}
 	if _, err := e.mx.account(ctx, "agent_iris", false); err == nil {
 		t.Fatal("retired Matrix identity was reactivated")
@@ -1038,7 +1062,14 @@ func TestFleetRestoresRunningSourceAndManualStartActivity(t *testing.T) {
 
 func TestFleetDeactivationFailureStillRetiresCredentials(t *testing.T) {
 	e, ctx, _, _ := fleetFixture(t)
-	e.mx.Base = httptestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "unavailable", 503) }))
+	e.mx.Base = httptestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The room purge succeeds; only the deactivation call is unavailable.
+		if strings.Contains(r.URL.Path, "/admin/v1/rooms/") {
+			replyJSON(w, map[string]any{})
+			return
+		}
+		http.Error(w, "unavailable", 503)
+	}))
 	fleetTestCommand(t, e, ctx, "!fleet delete iris")
 	cf := e.s.View().FleetConfirmation
 	fleetTestCommand(t, e, ctx, "!fleet confirm-delete iris "+cf.Code)
@@ -1052,6 +1083,45 @@ func TestFleetDeactivationFailureStillRetiresCredentials(t *testing.T) {
 	m := e.s.View().Members[fleetID]
 	if !strings.Contains(m.Outbox[len(m.Outbox)-1].Text, "could not be confirmed") {
 		t.Fatal("deactivation failure not disclosed")
+	}
+}
+
+func TestFleetRoomPurgeFailureHoldsDeleteUntilRetry(t *testing.T) {
+	e, ctx, _, _ := fleetFixture(t)
+	var purgeFails atomic.Bool
+	purgeFails.Store(true)
+	e.mx.Base = httptestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/admin/v1/rooms/") {
+			if purgeFails.Load() {
+				http.Error(w, "unavailable", 503)
+				return
+			}
+			replyJSON(w, map[string]any{})
+			return
+		}
+		replyJSON(w, map[string]any{})
+	}))
+	fleetTestCommand(t, e, ctx, "!fleet delete iris")
+	cf := e.s.View().FleetConfirmation
+	fleetTestCommand(t, e, ctx, "!fleet confirm-delete iris "+cf.Code)
+	for i := 0; i < 8 && e.s.View().FleetOperation != nil; i++ {
+		e.fleetStep(ctx)
+		if op := e.s.View().FleetOperation; op != nil && op.Error != "" {
+			break
+		}
+	}
+	op := e.s.View().FleetOperation
+	if op == nil || op.Error == "" || !strings.Contains(op.Error, "purge") {
+		t.Fatalf("failed room purge did not hold the delete: %+v", op)
+	}
+	if !e.s.View().Members["iris"].Deleted {
+		t.Fatal("dispatch was not disabled while the delete is held")
+	}
+	purgeFails.Store(false)
+	fleetTestCommand(t, e, ctx, "!fleet retry")
+	completeFleetTestOperation(t, e, ctx)
+	if e.s.View().FleetOperation != nil {
+		t.Fatal("delete did not complete after the retry")
 	}
 }
 

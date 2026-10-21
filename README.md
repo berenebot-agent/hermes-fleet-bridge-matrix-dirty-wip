@@ -375,7 +375,8 @@ More · Lifecycle contains Start, Shutdown, Pause/Enable and Delete.
 Renaming never moves the agent directory or restarts its containers.
 It uses managed parent-directory mounts in the main Compose file; existing
 deployments are not silently migrated.
-Matrix history is retained when an agent is deleted.
+Matrix history is erased when an agent is deleted: its own room is purged from
+the homeserver and leaves your room list.
 
 Without Fleet management, recreate the service after editing membership/mounts. Adding an agent provisions
 its room; removing one disables new dispatch, cancels queued turns, drains admitted
